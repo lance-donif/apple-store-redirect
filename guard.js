@@ -165,18 +165,20 @@
   addEventListener("hashchange", repairCurrentUrl, true);
   queueMicrotask(repairCurrentUrl);
 
-  const injectCountrySwitcher = () => {
-    const NAV_SELECTOR = "/html/body/div/div/div[1]/div/nav";
-    const TARGET_SELECTOR = "/html/body/div/div/div[1]/div/nav/div[2]/div[1]/div[2]";
+  const TARGET_SELECTOR = "/html/body/div/div/div[1]/div/nav/div[2]/div[1]/div[2]";
 
-    const target = document.evaluate(
-      TARGET_SELECTOR,
-      document,
-      null,
-      XPathResult.FIRST_ORDERED_NODE_TYPE,
-      null
-    ).singleNodeValue;
-    if (!target || document.getElementById("apple-store-country-switcher")) return;
+  const resolveTarget = () =>
+    document.evaluate(TARGET_SELECTOR, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
+      .singleNodeValue;
+
+  const applyStorefrontCookie = (code) => {
+    const date = new Date();
+    date.setFullYear(date.getFullYear() + 1);
+    document.cookie = `geo=${code.toUpperCase()};domain=.apple.com;path=/;expires=${date.toUTCString()};secure;samesite=none`;
+  };
+
+  const buildCountrySwitcher = (target) => {
+    if (!target || document.getElementById("apple-store-country-switcher")) return false;
 
     const wrapper = document.createElement("div");
     wrapper.id = "apple-store-country-switcher";
@@ -201,12 +203,6 @@
       padding:8px 0;display:none;z-index:9999;
     `;
 
-    const applyStorefrontCookie = (code) => {
-      const date = new Date();
-      date.setFullYear(date.getFullYear() + 1);
-      document.cookie = `geo=${code.toUpperCase()};domain=.apple.com;path=/;expires=${date.toUTCString()};secure;samesite=none`;
-    };
-
     for (const country of COUNTRIES) {
       const item = document.createElement("div");
       item.style.cssText = `
@@ -228,8 +224,7 @@
     }
 
     button.onclick = () => {
-      const isOpen = menu.style.display === "block";
-      menu.style.display = isOpen ? "none" : "block";
+      menu.style.display = menu.style.display === "block" ? "none" : "block";
     };
 
     document.addEventListener("click", (event) => {
@@ -238,6 +233,18 @@
 
     wrapper.append(button, menu);
     target.append(wrapper);
+    return true;
+  };
+
+  const injectCountrySwitcher = () => {
+    if (buildCountrySwitcher(resolveTarget())) return;
+
+    const observer = new MutationObserver(() => {
+      if (buildCountrySwitcher(resolveTarget())) {
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
   };
 
   if (document.readyState === "loading") {

@@ -77,6 +77,10 @@ function runAt(href, storage = {}) {
       }
     },
     XPathResult: { FIRST_ORDERED_NODE_TYPE: 9 },
+    MutationObserver: class {
+      observe() {}
+      disconnect() {}
+    },
     addEventListener(eventName) {
       calls.push(["addEventListener", eventName]);
     },
