@@ -21,3 +21,9 @@ When visiting a non-China App Store link, Apple redirects the page to the China 
 1. Open Chrome / Edge and go to `chrome://extensions/` (or `edge://extensions/`).
 2. Enable **Developer mode**.
 3. Click **Load unpacked** and select this project folder.
+
+## Quick Country/Region Switch
+
+After installing the extension, a button showing the current country/region (e.g., "United States (US)") will appear at the top of the left sidebar on App Store pages. Click it to switch between 37 countries/regions, including China mainland (CN).
+
+![Quick Country Switch](快捷切换国家.png)
