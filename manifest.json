@@ -20,14 +20,16 @@
       "js": ["guard.js"],
       "run_at": "document_start",
       "world": "MAIN"
+    },
+    {
+      "matches": ["https://apps.apple.com/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
     }
   ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
-  },
-  "externally_connectable": {
-    "matches": ["https://apps.apple.com/*"]
   },
   "action": {
     "default_title": "Apple Store Redirect Guard"
