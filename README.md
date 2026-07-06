@@ -6,7 +6,7 @@
 
 ## 问题
 
-访问 `https://apps.apple.com/us/app/12-twelves/id6447656121` 时，Apple 会根据你的 IP 强制跳转到 `https://apps.apple.com/cn/iphone/today`。
+访问非中国区 App Store 链接时，Apple 会根据你的 IP 强制跳转到中国区的 Today 页面。
 
 ## 功能
 
