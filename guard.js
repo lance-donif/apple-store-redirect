@@ -228,9 +228,21 @@
         try {
           sessionStorage.removeItem(COUNTRY_STORAGE_KEY);
         } catch {}
-        const url = new URL(location.href);
-        url.pathname = `/${country.code.toLowerCase()}${url.pathname.replace(COUNTRY_PATH, "/")}`;
-        window.location.href = url.href;
+
+        const performNavigation = () => {
+          const url = new URL(location.href);
+          url.pathname = `/${country.code.toLowerCase()}${url.pathname.replace(COUNTRY_PATH, "/")}`;
+          window.location.href = url.href;
+        };
+
+        if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage(
+            { action: "switchCountry", country: country.code },
+            () => performNavigation()
+          );
+        } else {
+          performNavigation();
+        }
       };
       menu.append(item);
     }

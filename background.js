@@ -42,3 +42,23 @@ chrome.webNavigation.onBeforeNavigate.addListener(
   },
   { url: [{ hostEquals: APPLE_APPS_HOST }] }
 );
+
+chrome.runtime.onMessageExternal?.addListener((request, _sender, sendResponse) => {
+  if (request?.action === "switchCountry") {
+    const country = String(request.country).toLowerCase();
+    Promise.allSettled([setGeoCookie(country), clearItspodCookie()]).then(() => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+});
+
+chrome.runtime.onMessage?.addListener((request, _sender, sendResponse) => {
+  if (request?.action === "switchCountry") {
+    const country = String(request.country).toLowerCase();
+    Promise.allSettled([setGeoCookie(country), clearItspodCookie()]).then(() => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+});
