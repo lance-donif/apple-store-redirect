@@ -6,7 +6,7 @@ Prevents Apple from redirecting non-China App Store pages back to China based on
 
 ## Problem
 
-When visiting `https://apps.apple.com/us/app/12-twelves/id6447656121`, Apple redirects the page to `https://apps.apple.com/cn/iphone/today` if your IP appears to be from China.
+When visiting a non-China App Store link, Apple redirects the page to the China Today page if your IP appears to be from China.
 
 ## Features
 
