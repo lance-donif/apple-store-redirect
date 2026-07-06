@@ -235,14 +235,24 @@
           window.location.href = url.href;
         };
 
-        if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
-          chrome.runtime.sendMessage(
-            { action: "switchCountry", country: country.code },
-            () => performNavigation()
-          );
-        } else {
+        window.postMessage(
+          { source: "apple-store-guard", action: "switchCountry", country: country.code },
+          "*"
+        );
+
+        const onBridgeResponse = (event) => {
+          if (event.source !== window) return;
+          if (event.data?.source !== "apple-store-guard-bridge") return;
+          if (event.data?.action !== "switchCountryDone") return;
+          window.removeEventListener("message", onBridgeResponse);
           performNavigation();
-        }
+        };
+
+        window.addEventListener("message", onBridgeResponse);
+        setTimeout(() => {
+          window.removeEventListener("message", onBridgeResponse);
+          performNavigation();
+        }, 3000);
       };
       menu.append(item);
     }
