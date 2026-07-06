@@ -60,18 +60,23 @@ function runAt(href, storage = {}) {
       }
     },
     document: {
+      readyState: "complete",
       getElementById(id) {
         return styles.find((style) => style.id === id) ?? null;
       },
       createElement(tagName) {
-        const element = { tagName, id: "", textContent: "" };
+        const element = { tagName, id: "", textContent: "", style: {}, children: [], append(...nodes) { this.children.push(...nodes); } };
         styles.push(element);
         return element;
       },
       documentElement: {
         append() {}
+      },
+      evaluate() {
+        return { singleNodeValue: null };
       }
     },
+    XPathResult: { FIRST_ORDERED_NODE_TYPE: 9 },
     addEventListener(eventName) {
       calls.push(["addEventListener", eventName]);
     },
