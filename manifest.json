@@ -26,6 +26,9 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "externally_connectable": {
+    "matches": ["https://apps.apple.com/*"]
+  },
   "action": {
     "default_title": "Apple Store Redirect Guard"
   }
