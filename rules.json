@@ -1,0 +1,19 @@
+[
+  {
+    "id": 1,
+    "priority": 100,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "x-apple-store-front",
+          "operation": "remove"
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||apps.apple.com/",
+      "resourceTypes": ["main_frame"]
+    }
+  }
+]
