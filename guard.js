@@ -94,9 +94,10 @@
   })();
 
   const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_TODAY_PATH.test(startUrl.pathname) ? storedCountry : null;
-  if (!targetCountry) return;
 
-  globalThis[GUARD_MARKER] = { country: targetCountry, version: 3 };
+  if (targetCountry) {
+    globalThis[GUARD_MARKER] = { country: targetCountry, version: 3 };
+  }
 
   const guarded = (rawUrl) => {
     if (rawUrl == null) return rawUrl;
@@ -165,11 +166,20 @@
   addEventListener("hashchange", repairCurrentUrl, true);
   queueMicrotask(repairCurrentUrl);
 
-  const TARGET_SELECTOR = "/html/body/div/div/div[1]/div/nav/div[2]/div[1]/div[2]";
-
-  const resolveTarget = () =>
-    document.evaluate(TARGET_SELECTOR, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
-      .singleNodeValue;
+  const resolveNavTarget = () => {
+    const nav = document.querySelector('nav');
+    if (!nav) return null;
+    const lists = nav.querySelectorAll('ul, ol');
+    const target = nav.querySelector('[data-testid*="navigation"], [role="navigation"]');
+    if (target) return target;
+    const rightSection = Array.from(nav.children).find((el) => {
+      const rect = el.getBoundingClientRect?.();
+      return rect && rect.left > window.innerWidth / 2;
+    });
+    if (rightSection) return rightSection;
+    if (lists.length >= 2) return lists[lists.length - 1];
+    return nav.firstElementChild || nav;
+  };
 
   const applyStorefrontCookie = (code) => {
     const date = new Date();
@@ -177,15 +187,13 @@
     document.cookie = `geo=${code.toUpperCase()};domain=.apple.com;path=/;expires=${date.toUTCString()};secure;samesite=none`;
   };
 
-  const buildCountrySwitcher = (target) => {
-    if (!target || document.getElementById("apple-store-country-switcher")) return false;
-
+  const createCountrySwitcher = (activeCountry) => {
     const wrapper = document.createElement("div");
     wrapper.id = "apple-store-country-switcher";
     wrapper.style.cssText = "position:relative;display:inline-flex;align-items:center;height:44px;margin-left:12px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif;";
 
     const button = document.createElement("button");
-    const current = COUNTRIES.find((c) => c.code.toLowerCase() === targetCountry) || COUNTRIES[0];
+    const current = COUNTRIES.find((c) => c.code.toLowerCase() === activeCountry) || COUNTRIES[0];
     button.textContent = `${current.name} (${current.code})`;
     button.style.cssText = `
       display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;
@@ -232,24 +240,25 @@
     });
 
     wrapper.append(button, menu);
-    target.append(wrapper);
-    return true;
+    return wrapper;
   };
 
   const injectCountrySwitcher = () => {
-    if (buildCountrySwitcher(resolveTarget())) return;
+    const activeCountry = countryOf(new URL(location.href)) || targetCountry || "us";
+    let existing = document.getElementById("apple-store-country-switcher");
+    if (existing && existing.dataset?.country === activeCountry) return;
+    if (existing) existing.remove();
 
-    const observer = new MutationObserver(() => {
-      if (buildCountrySwitcher(resolveTarget())) {
-        observer.disconnect();
-      }
-    });
-    observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+    const target = resolveNavTarget();
+    if (!target) return;
+
+    const switcher = createCountrySwitcher(activeCountry);
+    switcher.dataset.country = activeCountry;
+    target.append(switcher);
   };
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", injectCountrySwitcher);
-  } else {
-    injectCountrySwitcher();
-  }
+  injectCountrySwitcher();
+
+  const observer = new MutationObserver(injectCountrySwitcher);
+  observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
 })();

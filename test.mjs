@@ -74,6 +74,12 @@ function runAt(href, storage = {}) {
       },
       evaluate() {
         return { singleNodeValue: null };
+      },
+      querySelector() {
+        return null;
+      },
+      querySelectorAll() {
+        return [];
       }
     },
     XPathResult: { FIRST_ORDERED_NODE_TYPE: 9 },
@@ -174,6 +180,6 @@ assert.deepEqual(redirectedCnToday.calls, [
 const cn = runAt("https://apps.apple.com/cn/app/example/id1");
 cn.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
 
-assert.equal(cn.calls.length, 5);
+assert.equal(cn.calls.length, 7);
 
 console.log("ok");
