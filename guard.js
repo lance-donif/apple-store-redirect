@@ -183,6 +183,10 @@
     document.cookie = `geo=${code.toUpperCase()};domain=.apple.com;path=/;expires=${date.toUTCString()};secure;samesite=none`;
   };
 
+  const clearItspodCookie = () => {
+    document.cookie = "itspod=;domain=.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+  };
+
   const createCountrySwitcher = (activeCountry) => {
     const wrapper = document.createElement("div");
     wrapper.id = "apple-store-country-switcher";
@@ -218,6 +222,7 @@
       item.onmouseleave = () => (item.style.background = "transparent");
       item.onclick = () => {
         applyStorefrontCookie(country.code);
+        clearItspodCookie();
         button.textContent = `${country.name} (${country.code})`;
         menu.style.display = "none";
         try {
