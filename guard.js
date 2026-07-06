@@ -167,18 +167,13 @@
   queueMicrotask(repairCurrentUrl);
 
   const resolveNavTarget = () => {
-    const nav = document.querySelector('nav');
+    const nav = document.querySelector('nav[data-testid="navigation"]') || document.querySelector('nav');
     if (!nav) return null;
-    const lists = nav.querySelectorAll('ul, ol');
+    const header = nav.querySelector('.navigation__header');
+    if (header) return header;
     const target = nav.querySelector('[data-testid*="navigation"], [role="navigation"]');
     if (target) return target;
-    const rightSection = Array.from(nav.children).find((el) => {
-      const rect = el.getBoundingClientRect?.();
-      return rect && rect.left > window.innerWidth / 2;
-    });
-    if (rightSection) return rightSection;
-    if (lists.length >= 2) return lists[lists.length - 1];
-    return nav.firstElementChild || nav;
+    return nav;
   };
 
   const applyStorefrontCookie = (code) => {
@@ -245,9 +240,11 @@
 
   const injectCountrySwitcher = () => {
     const activeCountry = countryOf(new URL(location.href)) || targetCountry || "us";
-    let existing = document.getElementById("apple-store-country-switcher");
-    if (existing && existing.dataset?.country === activeCountry) return;
-    if (existing) existing.remove();
+    const existing = document.getElementById("apple-store-country-switcher");
+    if (existing) {
+      if (existing.dataset?.country === activeCountry && document.contains(existing)) return;
+      existing.remove();
+    }
 
     const target = resolveNavTarget();
     if (!target) return;
@@ -259,6 +256,11 @@
 
   injectCountrySwitcher();
 
-  const observer = new MutationObserver(injectCountrySwitcher);
+  let observer;
+  const scheduleInject = () => {
+    if (document.getElementById("apple-store-country-switcher")) return;
+    injectCountrySwitcher();
+  };
+  observer = new MutationObserver(scheduleInject);
   observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
 })();
