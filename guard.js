@@ -105,6 +105,7 @@
     try {
       const url = new URL(String(rawUrl), location.href);
       if (url.hostname !== APPLE_HOST || !CHINA_TODAY_PATH.test(url.pathname)) return rawUrl;
+      if (!targetCountry) return rawUrl;
 
       url.pathname = `/${targetCountry}/iphone/today`;
       return typeof rawUrl === "string" ? url.href : url;
@@ -114,7 +115,7 @@
   };
 
   const repairCurrentUrl = () => {
-    if (!CHINA_TODAY_PATH.test(location.pathname)) return;
+    if (!targetCountry || !CHINA_TODAY_PATH.test(location.pathname)) return;
 
     const url = new URL(location.href);
     url.pathname = `/${targetCountry}/iphone/today`;
