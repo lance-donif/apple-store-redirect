@@ -1,7 +1,7 @@
 (() => {
   const APPLE_HOST = "apps.apple.com";
   const COUNTRY_PATH = /^\/([a-z]{2})(?:\/|$)/i;
-  const CHINA_TODAY_PATH = /^\/cn\/iphone\/today\/?$/i;
+  const CHINA_PATH = /^\/cn(?:\/|$)/i;
   const GUARD_MARKER = "__appleStoreRedirectGuard";
   const COUNTRY_STORAGE_KEY = "appleStoreRedirectGuard.country";
   const SWITCHING_KEY = "appleStoreRedirectGuard.switching";
@@ -88,10 +88,17 @@
   const storedCountry = (() => {
     try {
       const country = sessionStorage.getItem(COUNTRY_STORAGE_KEY);
-      return /^[a-z]{2}$/.test(country) && country !== "cn" ? country : null;
-    } catch {
-      return null;
-    }
+      if (/^[a-z]{2}$/.test(country) && country !== "cn") return country;
+    } catch {}
+    // Fallback: read __asgc cookie set by background.js (Apple can't overwrite this)
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)__asgc=([A-Za-z]{2})/);
+      if (m) {
+        const c = m[1].toLowerCase();
+        if (c !== "cn") return c;
+      }
+    } catch {}
+    return null;
   })();
 
   const isSwitching = (() => {
@@ -105,7 +112,28 @@
     return false;
   })();
 
-  const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_TODAY_PATH.test(startUrl.pathname) && !isSwitching ? storedCountry : null;
+  const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_PATH.test(startUrl.pathname) && !isSwitching ? storedCountry : null;
+
+  // If we landed on /cn/ due to server redirect, force a full page redirect (once)
+  if (startCountry === "cn" && targetCountry) {
+    const REDIRECT_KEY = "appleStoreRedirectGuard.forceRedirect";
+    try {
+      const attempts = parseInt(sessionStorage.getItem(REDIRECT_KEY) || "0");
+      if (attempts < 1) {
+        sessionStorage.setItem(REDIRECT_KEY, String(attempts + 1));
+        const url = new URL(location.href);
+        url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
+        window.location.href = url.href;
+        return; // exit IIFE, page will reload at correct URL
+      }
+      sessionStorage.removeItem(REDIRECT_KEY);
+    } catch {}
+  }
+
+  // Clear redirect counter when successfully on non-CN page
+  if (startCountry && startCountry !== "cn") {
+    try { sessionStorage.removeItem("appleStoreRedirectGuard.forceRedirect"); } catch {}
+  }
 
   if (targetCountry) {
     globalThis[GUARD_MARKER] = { country: targetCountry, version: 3 };
@@ -116,11 +144,12 @@
 
     try {
       const url = new URL(String(rawUrl), location.href);
-      if (url.hostname !== APPLE_HOST || !CHINA_TODAY_PATH.test(url.pathname)) return rawUrl;
+      if (url.hostname !== APPLE_HOST || !CHINA_PATH.test(url.pathname)) return rawUrl;
       if (!targetCountry) return rawUrl;
       if (sessionStorage.getItem(SWITCHING_KEY)) return rawUrl;
 
-      url.pathname = `/${targetCountry}/iphone/today`;
+      // Replace /cn/ prefix with target country, preserve the rest of the path
+      url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
       return typeof rawUrl === "string" ? url.href : url;
     } catch {
       return rawUrl;
@@ -128,10 +157,10 @@
   };
 
   const repairCurrentUrl = () => {
-    if (!targetCountry || !CHINA_TODAY_PATH.test(location.pathname)) return;
+    if (!targetCountry || !CHINA_PATH.test(location.pathname)) return;
 
     const url = new URL(location.href);
-    url.pathname = `/${targetCountry}/iphone/today`;
+    url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
     history.replaceState(history.state, "", url.href);
   };
 
@@ -239,8 +268,19 @@
         button.textContent = `${country.name} (${country.code})`;
         menu.style.display = "none";
         try {
-          sessionStorage.removeItem(COUNTRY_STORAGE_KEY);
-          sessionStorage.setItem(SWITCHING_KEY, "1");
+          if (country.code.toLowerCase() === "cn") {
+            // Switching to CN: disable guard, clear our cookie
+            sessionStorage.removeItem(COUNTRY_STORAGE_KEY);
+            sessionStorage.setItem(SWITCHING_KEY, "1");
+            document.cookie = "__asgc=;domain=apps.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+          } else {
+            // Switching to non-CN: update guard cookie so redirect protection works
+            sessionStorage.setItem(COUNTRY_STORAGE_KEY, country.code.toLowerCase());
+            sessionStorage.removeItem(SWITCHING_KEY);
+            const date = new Date();
+            date.setFullYear(date.getFullYear() + 1);
+            document.cookie = `__asgc=${country.code.toUpperCase()};domain=apps.apple.com;path=/;expires=${date.toUTCString()};secure;samesite=none`;
+          }
         } catch {}
 
         const performNavigation = () => {
