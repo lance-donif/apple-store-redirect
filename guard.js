@@ -4,6 +4,7 @@
   const CHINA_TODAY_PATH = /^\/cn\/iphone\/today\/?$/i;
   const GUARD_MARKER = "__appleStoreRedirectGuard";
   const COUNTRY_STORAGE_KEY = "appleStoreRedirectGuard.country";
+  const SWITCHING_KEY = "appleStoreRedirectGuard.switching";
 
   const COUNTRIES = [
     { name: "美国", code: "US" },
@@ -93,7 +94,18 @@
     }
   })();
 
-  const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_TODAY_PATH.test(startUrl.pathname) ? storedCountry : null;
+  const isSwitching = (() => {
+    try {
+      const v = sessionStorage.getItem(SWITCHING_KEY);
+      if (v) {
+        sessionStorage.removeItem(SWITCHING_KEY);
+        return true;
+      }
+    } catch {}
+    return false;
+  })();
+
+  const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_TODAY_PATH.test(startUrl.pathname) && !isSwitching ? storedCountry : null;
 
   if (targetCountry) {
     globalThis[GUARD_MARKER] = { country: targetCountry, version: 3 };
@@ -106,6 +118,7 @@
       const url = new URL(String(rawUrl), location.href);
       if (url.hostname !== APPLE_HOST || !CHINA_TODAY_PATH.test(url.pathname)) return rawUrl;
       if (!targetCountry) return rawUrl;
+      if (sessionStorage.getItem(SWITCHING_KEY)) return rawUrl;
 
       url.pathname = `/${targetCountry}/iphone/today`;
       return typeof rawUrl === "string" ? url.href : url;
@@ -227,6 +240,7 @@
         menu.style.display = "none";
         try {
           sessionStorage.removeItem(COUNTRY_STORAGE_KEY);
+          sessionStorage.setItem(SWITCHING_KEY, "1");
         } catch {}
 
         const performNavigation = () => {
