@@ -3,7 +3,7 @@
   "name": "Apple Store Redirect Guard",
   "version": "1.2.0",
   "description": "Blocks Apple Store's client-side fallback to the China Today page.",
-  "permissions": ["cookies", "declarativeNetRequest", "webNavigation", "tabs"],
+  "permissions": ["cookies", "declarativeNetRequest", "webNavigation"],
   "host_permissions": ["https://apps.apple.com/*"],
   "declarative_net_request": {
     "rule_resources": [
@@ -20,11 +20,6 @@
       "js": ["guard.js"],
       "run_at": "document_start",
       "world": "MAIN"
-    },
-    {
-      "matches": ["https://apps.apple.com/*"],
-      "js": ["bridge.js"],
-      "run_at": "document_start"
     }
   ],
   "background": {

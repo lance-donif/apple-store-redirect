@@ -85,32 +85,31 @@
     } catch {}
   }
 
-  const storedCountry = (() => {
-    try {
-      const country = sessionStorage.getItem(COUNTRY_STORAGE_KEY);
-      if (/^[a-z]{2}$/.test(country) && country !== "cn") return country;
-    } catch {}
-    // Fallback: read __asgc cookie set by background.js (Apple can't overwrite this)
+  let storedCountry = null;
+  try {
+    const country = sessionStorage.getItem(COUNTRY_STORAGE_KEY);
+    if (/^[a-z]{2}$/.test(country) && country !== "cn") {
+      storedCountry = country;
+    }
+  } catch {}
+  if (!storedCountry) {
     try {
       const m = document.cookie.match(/(?:^|;\s*)__asgc=([A-Za-z]{2})/);
       if (m) {
         const c = m[1].toLowerCase();
-        if (c !== "cn") return c;
+        if (c !== "cn") storedCountry = c;
       }
     } catch {}
-    return null;
-  })();
+  }
 
-  const isSwitching = (() => {
-    try {
-      const v = sessionStorage.getItem(SWITCHING_KEY);
-      if (v) {
-        sessionStorage.removeItem(SWITCHING_KEY);
-        return true;
-      }
-    } catch {}
-    return false;
-  })();
+  let isSwitching = false;
+  try {
+    const v = sessionStorage.getItem(SWITCHING_KEY);
+    if (v) {
+      sessionStorage.removeItem(SWITCHING_KEY);
+      isSwitching = true;
+    }
+  } catch {}
 
   const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_PATH.test(startUrl.pathname) && !isSwitching ? storedCountry : null;
 
@@ -283,30 +282,9 @@
           }
         } catch {}
 
-        const performNavigation = () => {
-          const url = new URL(location.href);
-          url.pathname = `/${country.code.toLowerCase()}${url.pathname.replace(COUNTRY_PATH, "/")}`;
-          window.location.href = url.href;
-        };
-
-        window.postMessage(
-          { source: "apple-store-guard", action: "switchCountry", country: country.code },
-          "*"
-        );
-
-        const onBridgeResponse = (event) => {
-          if (event.source !== window) return;
-          if (event.data?.source !== "apple-store-guard-bridge") return;
-          if (event.data?.action !== "switchCountryDone") return;
-          window.removeEventListener("message", onBridgeResponse);
-          performNavigation();
-        };
-
-        window.addEventListener("message", onBridgeResponse);
-        setTimeout(() => {
-          window.removeEventListener("message", onBridgeResponse);
-          performNavigation();
-        }, 3000);
+        const url = new URL(location.href);
+        url.pathname = `/${country.code.toLowerCase()}${url.pathname.replace(COUNTRY_PATH, "/")}`;
+        window.location.href = url.href;
       };
       menu.append(item);
     }
