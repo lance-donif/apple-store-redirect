@@ -220,9 +220,12 @@
         applyStorefrontCookie(country.code);
         button.textContent = `${country.name} (${country.code})`;
         menu.style.display = "none";
+        try {
+          sessionStorage.removeItem(COUNTRY_STORAGE_KEY);
+        } catch {}
         const url = new URL(location.href);
         url.pathname = `/${country.code.toLowerCase()}${url.pathname.replace(COUNTRY_PATH, "/")}`;
-        location.assign(url.href);
+        window.location.href = url.href;
       };
       menu.append(item);
     }
