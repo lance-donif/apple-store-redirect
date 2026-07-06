@@ -14,7 +14,8 @@ async function setGeoCookie(country) {
     domain: ".apple.com",
     path: "/",
     secure: true,
-    sameSite: "no_restriction"
+    sameSite: "no_restriction",
+    expirationDate: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60
   });
 }
 
@@ -33,7 +34,22 @@ async function setGuardCookie(country) {
     domain: "apps.apple.com",
     path: "/",
     secure: true,
-    sameSite: "no_restriction"
+    sameSite: "no_restriction",
+    expirationDate: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60
+  });
+}
+
+// Save the original path so guard.js can redirect back to the exact page
+async function setGuardPathCookie(fullPath) {
+  await chrome.cookies.set({
+    url: "https://apps.apple.com/",
+    name: "__asgp",
+    value: fullPath,
+    domain: "apps.apple.com",
+    path: "/",
+    secure: true,
+    sameSite: "no_restriction",
+    expirationDate: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60
   });
 }
 
@@ -52,6 +68,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(
     if (country !== "cn") {
       setGeoCookie(country);
       setGuardCookie(country);
+      setGuardPathCookie(encodeURIComponent(url.pathname + url.search + url.hash));
       clearItspodCookie();
     }
   },
