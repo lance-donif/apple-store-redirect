@@ -4,7 +4,7 @@
   "version": "1.2.0",
   "description": "Blocks Apple Store's client-side fallback to the China Today page.",
   "permissions": ["cookies", "declarativeNetRequest", "webNavigation"],
-  "host_permissions": ["https://apps.apple.com/*"],
+  "host_permissions": ["https://apps.apple.com/*", "https://fanqienovel.com/*"],
   "declarative_net_request": {
     "rule_resources": [
       {
@@ -18,6 +18,12 @@
     {
       "matches": ["https://apps.apple.com/*"],
       "js": ["guard.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://fanqienovel.com/reader/*"],
+      "js": ["fanqie-copy.js"],
       "run_at": "document_start",
       "world": "MAIN"
     }

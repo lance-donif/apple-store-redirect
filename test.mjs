@@ -4,10 +4,15 @@ import vm from "node:vm";
 
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
 const guard = await readFile("guard.js", "utf8");
+const fanqieCopy = await readFile("fanqie-copy.js", "utf8");
 
 assert.equal(manifest.content_scripts[0].js[0], "guard.js");
 assert.equal(manifest.content_scripts[0].run_at, "document_start");
 assert.equal(manifest.content_scripts[0].world, "MAIN");
+assert.deepEqual(manifest.content_scripts[1].matches, ["https://fanqienovel.com/reader/*"]);
+assert.equal(manifest.content_scripts[1].js[0], "fanqie-copy.js");
+assert.equal(manifest.content_scripts[1].run_at, "document_start");
+assert.equal(manifest.content_scripts[1].world, "MAIN");
 assert.equal(manifest.declarative_net_request.rule_resources[0].path, "rules.json");
 assert.equal(manifest.background.service_worker, "background.js");
 
@@ -178,5 +183,68 @@ const cn = runAt("https://apps.apple.com/cn/app/example/id1");
 cn.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
 
 assert.equal(cn.calls.length, 7);
+
+{
+  const listeners = {};
+  const styles = [];
+  let removed = false;
+  let observed = false;
+  const readerElement = {
+    nodeType: 1,
+    classList: {
+      remove(value) {
+        if (value === "noselect") removed = true;
+      }
+    },
+    closest(selector) {
+      return selector === ".muye-reader-content" ? this : null;
+    }
+  };
+  const textNode = { parentElement: readerElement };
+  const context = {
+    location: { hostname: "fanqienovel.com" },
+    document: {
+      documentElement: {
+        append(node) {
+          styles.push(node);
+        }
+      },
+      getElementById(id) {
+        return styles.find((style) => style.id === id) ?? null;
+      },
+      createElement(tagName) {
+        return { tagName, id: "", textContent: "" };
+      },
+      querySelectorAll(selector) {
+        return selector === ".muye-reader-content.noselect" ? [readerElement] : [];
+      }
+    },
+    addEventListener(eventName, callback) {
+      listeners[eventName] = callback;
+    },
+    getSelection() {
+      return { isCollapsed: false, anchorNode: textNode, focusNode: textNode };
+    },
+    MutationObserver: class {
+      constructor(callback) {
+        this.callback = callback;
+      }
+      observe() {
+        observed = true;
+      }
+    }
+  };
+  context.globalThis = context;
+
+  vm.runInNewContext(fanqieCopy, context);
+
+  let stopped = false;
+  listeners.copy({ type: "copy", stopImmediatePropagation() { stopped = true; } });
+
+  assert.equal(removed, true);
+  assert.equal(observed, true);
+  assert.match(styles[0].textContent, /user-select:\s*text/);
+  assert.equal(stopped, true);
+}
 
 console.log("ok");
