@@ -5,6 +5,11 @@ const COOKIE_URLS = [
   "https://apps.apple.com/",
   "https://itunes.apple.com/"
 ];
+const LEGACY_STORE_FRONT_RULE_ID = 2;
+
+chrome.declarativeNetRequest.updateSessionRules({
+  removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID]
+});
 
 async function setGeoCookie(country) {
   await chrome.cookies.set({

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
+const background = await readFile("background.js", "utf8");
 const guard = await readFile("guard.js", "utf8");
 const fanqieCopy = await readFile("fanqie-copy.js", "utf8");
 
@@ -15,6 +16,9 @@ assert.equal(manifest.content_scripts[1].run_at, "document_start");
 assert.equal(manifest.content_scripts[1].world, "MAIN");
 assert.equal(manifest.declarative_net_request.rule_resources[0].path, "rules.json");
 assert.equal(manifest.background.service_worker, "background.js");
+assert.ok(!background.match(/X-Apple-Store-Front/i));
+assert.ok(!background.includes("operation: \"set\""));
+assert.ok(background.includes("removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID]"));
 
 const rules = JSON.parse(await readFile("rules.json", "utf8"));
 assert.equal(rules[0].action.requestHeaders[0].header, "x-apple-store-front");
@@ -22,9 +26,10 @@ assert.equal(rules[0].action.requestHeaders[0].operation, "remove");
 assert.equal(rules[0].condition.resourceTypes[0], "main_frame");
 assert.ok(!rules[0].action.requestHeaders.some((h) => h.header === "cookie"));
 
-function runAt(href, storage = {}) {
+function runAt(href, storage = {}, cookie = "") {
   const calls = [];
   const styles = [];
+  let cookieJar = cookie;
   let currentUrl = new URL(href);
   const location = {
     get href() {
@@ -47,6 +52,7 @@ function runAt(href, storage = {}) {
   };
   const context = {
     URL,
+    decodeURIComponent,
     location,
     sessionStorage: {
       clear() {
@@ -54,6 +60,9 @@ function runAt(href, storage = {}) {
       },
       getItem(key) {
         return session.get(key) ?? null;
+      },
+      removeItem(key) {
+        session.delete(key);
       },
       setItem(key, value) {
         session.set(key, String(value));
@@ -74,7 +83,14 @@ function runAt(href, storage = {}) {
         styles.push(element);
         return element;
       },
+      get cookie() {
+        return cookieJar;
+      },
+      set cookie(value) {
+        cookieJar = cookieJar ? `${cookieJar}; ${value}` : String(value);
+      },
       documentElement: {
+        style: {},
         append() {}
       },
       evaluate() {
@@ -156,7 +172,7 @@ assert.match(us.styles[0].textContent, /user-select:\s*text/);
 assert.equal(us.context.__appleStoreRedirectGuard.country, "us");
 assert.equal(us.context.__appleStoreRedirectGuard.version, 3);
 assert.equal(us.session.get("appleStoreRedirectGuard.country"), "us");
-assert.equal(us.local.size, 0);
+assert.equal(us.local.size, 1); // localStorage is no longer cleared (it breaks Apple's PWA bootstrap)
 
 const jp = runAt("https://apps.apple.com/jp/app/%E5%9B%B3%E5%BD%A2%E9%9B%BB%E5%8D%93-shapeinfo-plus/id983851989");
 jp.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
@@ -178,6 +194,28 @@ const redirectedCnToday = runAt("https://apps.apple.com/cn/iphone/today", {
 // Since force-redirect triggers immediately, no event listeners or states are replaced
 // However, the test mock location updates the URL synchronously via setTimeout mock
 assert.equal(redirectedCnToday.context.location.href, "https://apps.apple.com/us/iphone/today");
+
+const restoredAppPath = runAt(
+  "https://apps.apple.com/cn/iphone/today",
+  { "appleStoreRedirectGuard.country": "us" },
+  `__asgp=${encodeURIComponent("/us/app/12-twelves/id6447656121")}; __asgc=US`
+);
+
+assert.equal(restoredAppPath.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
+assert.equal(restoredAppPath.calls[0][0], "replaceState");
+assert.equal(restoredAppPath.session.has("appleStoreRedirectGuard.forceRedirect"), false);
+
+const restoredWithStaleCounter = runAt(
+  "https://apps.apple.com/cn/iphone/today",
+  {
+    "appleStoreRedirectGuard.country": "us",
+    "appleStoreRedirectGuard.forceRedirect": "1"
+  },
+  `__asgp=${encodeURIComponent("/us/app/12-twelves/id6447656121")}; __asgc=US`
+);
+
+assert.equal(restoredWithStaleCounter.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
+assert.equal(restoredWithStaleCounter.session.has("appleStoreRedirectGuard.forceRedirect"), false);
 
 const cn = runAt("https://apps.apple.com/cn/app/example/id1");
 cn.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
