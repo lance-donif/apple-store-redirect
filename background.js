@@ -9,9 +9,29 @@ const COOKIE_URLS = [
 const LEGACY_STORE_FRONT_RULE_ID = 2;
 const lastAppPathByTab = new Map();
 const lastRestoreByTab = new Map();
+const APPLE_STORE_ORIGINS = ["https://apps.apple.com"];
+const APPLE_STORE_CACHE_TYPES = {
+  cache: true,
+  cacheStorage: true,
+  fileSystems: true,
+  indexedDB: true,
+  localStorage: true,
+  serviceWorkers: true,
+  webSQL: true
+};
 
 chrome.declarativeNetRequest.updateSessionRules({
   removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID]
+});
+
+async function clearAppleStoreCache() {
+  await chrome.browsingData.remove({ origins: APPLE_STORE_ORIGINS }, APPLE_STORE_CACHE_TYPES);
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === "install" || details.reason === "update") {
+    clearAppleStoreCache();
+  }
 });
 
 async function setGeoCookie(country) {

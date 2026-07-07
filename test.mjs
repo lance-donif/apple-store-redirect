@@ -16,6 +16,7 @@ assert.equal(manifest.content_scripts[1].run_at, "document_start");
 assert.equal(manifest.content_scripts[1].world, "MAIN");
 assert.equal(manifest.declarative_net_request.rule_resources[0].path, "rules.json");
 assert.equal(manifest.background.service_worker, "background.js");
+assert.ok(manifest.permissions.includes("browsingData"));
 assert.ok(!background.match(/X-Apple-Store-Front/i));
 assert.ok(!background.includes("operation: \"set\""));
 assert.ok(background.includes("removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID]"));
@@ -59,6 +60,16 @@ async function runBackgroundNavigations(urls, cookies = {}) {
           return Promise.resolve();
         }
       },
+      browsingData: {
+        remove() {
+          return Promise.resolve();
+        }
+      },
+      runtime: {
+        onInstalled: {
+          addListener() {}
+        }
+      },
       webNavigation: {
         onBeforeNavigate: {
           addListener(callback) {
@@ -74,6 +85,72 @@ async function runBackgroundNavigations(urls, cookies = {}) {
     await listener({ frameId: 0, tabId: 1, url });
   }
   return { cookieSets, tabUpdates };
+}
+
+async function runBackgroundInstall(reason) {
+  const removals = [];
+  let installListener;
+  const context = {
+    URL,
+    chrome: {
+      cookies: {
+        set() {
+          return Promise.resolve();
+        },
+        remove() {
+          return Promise.resolve();
+        }
+      },
+      declarativeNetRequest: {
+        updateSessionRules() {
+          return Promise.resolve();
+        }
+      },
+      browsingData: {
+        remove(options, dataToRemove) {
+          removals.push({ options, dataToRemove });
+          return Promise.resolve();
+        }
+      },
+      runtime: {
+        onInstalled: {
+          addListener(callback) {
+            installListener = callback;
+          }
+        }
+      },
+      tabs: {
+        update() {
+          return Promise.resolve();
+        }
+      },
+      webNavigation: {
+        onBeforeNavigate: {
+          addListener() {}
+        }
+      }
+    }
+  };
+
+  vm.runInNewContext(background, context);
+  await installListener({ reason });
+  return removals;
+}
+
+{
+  const removals = await runBackgroundInstall("install");
+  assert.deepEqual(JSON.parse(JSON.stringify(removals)), [{
+    options: { origins: ["https://apps.apple.com"] },
+    dataToRemove: {
+      cache: true,
+      cacheStorage: true,
+      fileSystems: true,
+      indexedDB: true,
+      localStorage: true,
+      serviceWorkers: true,
+      webSQL: true
+    }
+  }]);
 }
 
 {
