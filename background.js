@@ -1,11 +1,14 @@
 const APPLE_APPS_HOST = "apps.apple.com";
-const COUNTRY_PATH = /^\/([a-z]{2})\//i;
+const COUNTRY_PATH = /^\/([a-z]{2})(?:\/|$)/i;
+const APP_PATH = /^\/[a-z]{2}\/app\//i;
 const COOKIE_URLS = [
   "https://apple.com/",
   "https://apps.apple.com/",
   "https://itunes.apple.com/"
 ];
 const LEGACY_STORE_FRONT_RULE_ID = 2;
+const lastAppPathByTab = new Map();
+const lastRestoreByTab = new Map();
 
 chrome.declarativeNetRequest.updateSessionRules({
   removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID]
@@ -58,8 +61,43 @@ async function setGuardPathCookie(fullPath) {
   });
 }
 
+function normalCountry(value) {
+  return /^[a-z]{2}$/i.test(value || "") ? value.toLowerCase() : null;
+}
+
+function savedAppUrl(value, country) {
+  try {
+    const url = new URL(decodeURIComponent(value || ""), "https://apps.apple.com/");
+    const pathCountry = url.pathname.match(COUNTRY_PATH)?.[1]?.toLowerCase();
+    if (url.hostname !== APPLE_APPS_HOST || pathCountry !== country || !APP_PATH.test(url.pathname)) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+async function restoreSavedAppPath(details) {
+  if (details.tabId < 0) return;
+
+  const countryCookie = await chrome.cookies.get({ url: "https://apps.apple.com/", name: "__asgc" });
+  const country = normalCountry(countryCookie?.value);
+  if (!country || country === "cn") return;
+
+  const pathCookie = await chrome.cookies.get({ url: "https://apps.apple.com/", name: "__asgp" });
+  const redirectUrl = savedAppUrl(lastAppPathByTab.get(details.tabId) || pathCookie?.value, country);
+  if (!redirectUrl) return;
+
+  const recent = lastRestoreByTab.get(details.tabId);
+  if (recent?.url === redirectUrl && Date.now() - recent.time < 5000) return;
+  lastRestoreByTab.set(details.tabId, { url: redirectUrl, time: Date.now() });
+
+  await setGeoCookie(country);
+  await clearItspodCookie();
+  await chrome.tabs.update(details.tabId, { url: redirectUrl });
+}
+
 chrome.webNavigation.onBeforeNavigate.addListener(
-  (details) => {
+  async (details) => {
     if (details.frameId !== 0) return;
 
     const url = new URL(details.url);
@@ -70,10 +108,19 @@ chrome.webNavigation.onBeforeNavigate.addListener(
 
     const country = match[1].toLowerCase();
 
+    if (country === "cn") {
+      await restoreSavedAppPath(details);
+      return;
+    }
+
     if (country !== "cn") {
       setGeoCookie(country);
       setGuardCookie(country);
-      setGuardPathCookie(encodeURIComponent(url.pathname + url.search + url.hash));
+      if (APP_PATH.test(url.pathname)) {
+        const appPath = url.pathname + url.search + url.hash;
+        lastAppPathByTab.set(details.tabId, appPath);
+        setGuardPathCookie(encodeURIComponent(appPath));
+      }
       clearItspodCookie();
     }
   },

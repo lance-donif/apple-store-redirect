@@ -26,8 +26,114 @@ assert.equal(rules[0].action.requestHeaders[0].operation, "remove");
 assert.equal(rules[0].condition.resourceTypes[0], "main_frame");
 assert.ok(!rules[0].action.requestHeaders.some((h) => h.header === "cookie"));
 
+async function runBackgroundNavigations(urls, cookies = {}) {
+  const cookieSets = [];
+  const tabUpdates = [];
+  const cookieJar = new Map(Object.entries(cookies));
+  let listener;
+  const context = {
+    URL,
+    chrome: {
+      cookies: {
+        set(details) {
+          cookieSets.push(details);
+          cookieJar.set(details.name, details.value);
+          return Promise.resolve(details);
+        },
+        get(details) {
+          const value = cookieJar.get(details.name);
+          return Promise.resolve(value == null ? null : { value });
+        },
+        remove() {
+          return Promise.resolve();
+        }
+      },
+      tabs: {
+        update(tabId, details) {
+          tabUpdates.push({ tabId, ...details });
+          return Promise.resolve(details);
+        }
+      },
+      declarativeNetRequest: {
+        updateSessionRules() {
+          return Promise.resolve();
+        }
+      },
+      webNavigation: {
+        onBeforeNavigate: {
+          addListener(callback) {
+            listener = callback;
+          }
+        }
+      }
+    }
+  };
+
+  vm.runInNewContext(background, context);
+  for (const url of urls) {
+    await listener({ frameId: 0, tabId: 1, url });
+  }
+  return { cookieSets, tabUpdates };
+}
+
+{
+  const { cookieSets } = await runBackgroundNavigations([
+    "https://apps.apple.com/us/app/12-twelves/id6447656121",
+    "https://apps.apple.com/us/iphone/today"
+  ]);
+  const savedPaths = cookieSets.filter((details) => details.name === "__asgp").map((details) => details.value);
+
+  assert.deepEqual(savedPaths, [encodeURIComponent("/us/app/12-twelves/id6447656121")]);
+}
+
+{
+  const { tabUpdates } = await runBackgroundNavigations([
+    "https://apps.apple.com/cn"
+  ], {
+    __asgc: "US",
+    __asgp: encodeURIComponent("/us/app/12-twelves/id6447656121")
+  });
+
+  assert.deepEqual(tabUpdates, [{ tabId: 1, url: "https://apps.apple.com/us/app/12-twelves/id6447656121" }]);
+}
+
+{
+  const { tabUpdates } = await runBackgroundNavigations([
+    "https://apps.apple.com/cn/iphone/today"
+  ], {
+    __asgc: "JP",
+    __asgp: encodeURIComponent("/jp/app/standland/id1033409631")
+  });
+
+  assert.deepEqual(tabUpdates, [{ tabId: 1, url: "https://apps.apple.com/jp/app/standland/id1033409631" }]);
+}
+
+{
+  const { tabUpdates } = await runBackgroundNavigations([
+    "https://apps.apple.com/cn",
+    "https://apps.apple.com/cn"
+  ], {
+    __asgc: "US",
+    __asgp: encodeURIComponent("/us/app/12-twelves/id6447656121")
+  });
+
+  assert.deepEqual(tabUpdates, [{ tabId: 1, url: "https://apps.apple.com/us/app/12-twelves/id6447656121" }]);
+}
+
+{
+  const { tabUpdates } = await runBackgroundNavigations([
+    "https://apps.apple.com/cn"
+  ], {
+    __asgc: "US",
+    __asgp: encodeURIComponent("/us/iphone/today")
+  });
+
+  assert.deepEqual(tabUpdates, []);
+}
+
 function runAt(href, storage = {}, cookie = "") {
   const calls = [];
+  const listeners = {};
   const styles = [];
   let cookieJar = cookie;
   let currentUrl = new URL(href);
@@ -110,6 +216,21 @@ function runAt(href, storage = {}, cookie = "") {
     },
     addEventListener(eventName) {
       calls.push(["addEventListener", eventName]);
+      listeners[eventName] ??= [];
+      listeners[eventName].push(arguments[1]);
+    },
+    dispatchEvent(event) {
+      calls.push(["dispatchEvent", event.type]);
+    },
+    Event: class {
+      constructor(type) {
+        this.type = type;
+      }
+    },
+    PopStateEvent: class {
+      constructor(type) {
+        this.type = type;
+      }
     },
     queueMicrotask(callback) {
       callback();
@@ -147,7 +268,7 @@ function runAt(href, storage = {}, cookie = "") {
   context.window = context;
 
   vm.runInNewContext(guard, context);
-  return { calls, context, local, session, styles };
+  return { calls, context, listeners, local, session, styles, get cookie() { return cookieJar; } };
 }
 
 const us = runAt("https://apps.apple.com/us/app/12-twelves/id6447656121");
@@ -157,6 +278,7 @@ us.context.navigation.navigate("https://apps.apple.com/cn/iphone/today");
 us.context.history.replaceState({}, "", "https://apps.apple.com/us/iphone/today");
 
 assert.deepEqual(us.calls, [
+  ["addEventListener", "click"],
   ["addEventListener", "copy"],
   ["addEventListener", "cut"],
   ["addEventListener", "contextmenu"],
@@ -174,10 +296,35 @@ assert.equal(us.context.__appleStoreRedirectGuard.version, 3);
 assert.equal(us.session.get("appleStoreRedirectGuard.country"), "us");
 assert.equal(us.local.size, 1); // localStorage is no longer cleared (it breaks Apple's PWA bootstrap)
 
+const clickedAppNavigation = runAt(
+  "https://apps.apple.com/us/iphone/today",
+  {},
+  `__asgp=${encodeURIComponent("/us/iphone/today")}; __asgc=US`
+);
+clickedAppNavigation.listeners.click[0]({
+  target: {
+    closest(selector) {
+      return selector === "a[href]" ? { href: "https://apps.apple.com/us/app/standland/id1033409631" } : null;
+    }
+  }
+});
+
+assert.match(clickedAppNavigation.cookie, new RegExp(`__asgp=${encodeURIComponent("/us/app/standland/id1033409631")}`));
+
+const spaAppNavigation = runAt(
+  "https://apps.apple.com/us/iphone/today",
+  {},
+  `__asgp=${encodeURIComponent("/us/iphone/today")}; __asgc=US`
+);
+spaAppNavigation.context.history.pushState({}, "", "https://apps.apple.com/us/app/standland/id1033409631");
+
+assert.match(spaAppNavigation.cookie, new RegExp(`__asgp=${encodeURIComponent("/us/app/standland/id1033409631")}`));
+
 const jp = runAt("https://apps.apple.com/jp/app/%E5%9B%B3%E5%BD%A2%E9%9B%BB%E5%8D%93-shapeinfo-plus/id983851989");
 jp.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
 
 assert.deepEqual(jp.calls, [
+  ["addEventListener", "click"],
   ["addEventListener", "copy"],
   ["addEventListener", "cut"],
   ["addEventListener", "contextmenu"],
@@ -204,6 +351,7 @@ const restoredAppPath = runAt(
 assert.equal(restoredAppPath.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
 assert.equal(restoredAppPath.calls[0][0], "replaceState");
 assert.equal(restoredAppPath.session.has("appleStoreRedirectGuard.forceRedirect"), false);
+assert.ok(restoredAppPath.calls.some((call) => call[0] === "dispatchEvent" && call[1] === "popstate"));
 
 const restoredWithStaleCounter = runAt(
   "https://apps.apple.com/cn/iphone/today",
@@ -216,11 +364,12 @@ const restoredWithStaleCounter = runAt(
 
 assert.equal(restoredWithStaleCounter.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
 assert.equal(restoredWithStaleCounter.session.has("appleStoreRedirectGuard.forceRedirect"), false);
+assert.ok(restoredWithStaleCounter.calls.some((call) => call[0] === "dispatchEvent" && call[1] === "popstate"));
 
 const cn = runAt("https://apps.apple.com/cn/app/example/id1");
 cn.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
 
-assert.equal(cn.calls.length, 7);
+assert.equal(cn.calls.length, 8);
 
 {
   const listeners = {};

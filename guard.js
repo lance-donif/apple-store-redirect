@@ -2,6 +2,7 @@
   const APPLE_HOST = "apps.apple.com";
   const COUNTRY_PATH = /^\/([a-z]{2})(?:\/|$)/i;
   const CHINA_PATH = /^\/cn(?:\/|$)/i;
+  const APP_PATH = /^\/[a-z]{2}\/app\//i;
   const GUARD_MARKER = "__appleStoreRedirectGuard";
   const COUNTRY_STORAGE_KEY = "appleStoreRedirectGuard.country";
   const SWITCHING_KEY = "appleStoreRedirectGuard.switching";
@@ -47,10 +48,35 @@
   ];
 
   const countryOf = (url) => url.pathname.match(COUNTRY_PATH)?.[1]?.toLowerCase() ?? null;
+  const persistAppPath = (url) => {
+    const country = countryOf(url);
+    if (!country || country === "cn" || !APP_PATH.test(url.pathname)) return;
+
+    try {
+      const exp = new Date();
+      exp.setFullYear(exp.getFullYear() + 1);
+      document.cookie = `__asgc=${country.toUpperCase()};domain=apps.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
+      document.cookie = `__asgp=${encodeURIComponent(url.pathname + url.search + url.hash)};domain=apps.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
+    } catch {}
+  };
+  const notifyRouteChange = () => {
+    try {
+      dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+    } catch {
+      try { dispatchEvent(new Event("popstate")); } catch {}
+    }
+  };
+  const notifyRouteChangeSoon = () => {
+    notifyRouteChange();
+    try {
+      addEventListener("DOMContentLoaded", notifyRouteChange, { once: true, capture: true });
+    } catch {}
+  };
 
   const startUrl = new URL(location.href);
   if (startUrl.hostname !== APPLE_HOST) return;
   const startCountry = countryOf(startUrl);
+  persistAppPath(startUrl);
 
   let storedCountry = null;
   try {
@@ -103,6 +129,7 @@
           document.cookie = `geo=${targetCountry.toUpperCase()};domain=.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
           document.cookie = "itspod=;domain=.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
           history.replaceState(history.state, "", redirectUrl);
+          notifyRouteChangeSoon();
           if (document.documentElement) document.documentElement.style.display = "";
         } else if (retries < 10) {
           retries++;
@@ -111,12 +138,23 @@
           const url = new URL(location.href);
           url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
           history.replaceState(history.state, "", url.href);
+          notifyRouteChangeSoon();
           if (document.documentElement) document.documentElement.style.display = "";
         }
       };
       tryRestorePath();
     } catch {}
   }
+
+  addEventListener("click", (event) => {
+    try {
+      const link = event.target?.closest?.("a[href]");
+      if (!link?.href) return;
+
+      const url = new URL(link.href, location.href);
+      if (url.hostname === APPLE_HOST) persistAppPath(url);
+    } catch {}
+  }, true);
 
   const enableSelection = () => {
     if (document.getElementById("apple-store-copy-guard-style")) return;
@@ -187,6 +225,7 @@
       value(...args) {
         args[2] = guarded(args[2]);
         const result = original.apply(this, args);
+        try { persistAppPath(new URL(args[2] ?? location.href, location.href)); } catch {}
         repairCurrentUrl();
         return result;
       }
@@ -198,7 +237,9 @@
     Object.defineProperty(globalThis.navigation, "navigate", {
       configurable: true,
       value(url, options) {
-        const result = original.call(this, guarded(url), options);
+        const nextUrl = guarded(url);
+        const result = original.call(this, nextUrl, options);
+        try { persistAppPath(new URL(nextUrl, location.href)); } catch {}
         queueMicrotask(repairCurrentUrl);
         return result;
       }
