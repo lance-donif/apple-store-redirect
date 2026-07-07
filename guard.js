@@ -52,39 +52,6 @@
   if (startUrl.hostname !== APPLE_HOST) return;
   const startCountry = countryOf(startUrl);
 
-  if (startCountry && startCountry !== "cn" && /^\/[a-z]{2}\/app\//i.test(startUrl.pathname)) {
-    try {
-      localStorage.clear();
-      sessionStorage.clear();
-    } catch {}
-  }
-
-  const enableSelection = () => {
-    if (document.getElementById("apple-store-copy-guard-style")) return;
-
-    const style = document.createElement("style");
-    style.id = "apple-store-copy-guard-style";
-    style.textContent = `
-      html, body, body * {
-        -webkit-user-select: text !important;
-        user-select: text !important;
-      }
-    `;
-    (document.documentElement || document.head || document.body)?.append(style);
-  };
-
-  enableSelection();
-
-  for (const eventName of ["copy", "cut", "contextmenu", "selectstart"]) {
-    globalThis.addEventListener?.(eventName, (event) => event.stopImmediatePropagation(), true);
-  }
-
-  if (startCountry && startCountry !== "cn") {
-    try {
-      sessionStorage.setItem(COUNTRY_STORAGE_KEY, startCountry);
-    } catch {}
-  }
-
   let storedCountry = null;
   try {
     const country = sessionStorage.getItem(COUNTRY_STORAGE_KEY);
@@ -113,19 +80,67 @@
 
   const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_PATH.test(startUrl.pathname) && !isSwitching ? storedCountry : null;
 
-  // If we landed on /cn/ due to server redirect, force a full page redirect (once)
+  // If we landed on /cn/ due to server redirect, restore the original path before Apple boots.
   if (startCountry === "cn" && targetCountry) {
-    const REDIRECT_KEY = "appleStoreRedirectGuard.forceRedirect";
     try {
-      const attempts = parseInt(sessionStorage.getItem(REDIRECT_KEY) || "0");
-      if (attempts < 1) {
-        sessionStorage.setItem(REDIRECT_KEY, String(attempts + 1));
-        const url = new URL(location.href);
-        url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
-        window.location.href = url.href;
-        return; // exit IIFE, page will reload at correct URL
+      sessionStorage.removeItem("appleStoreRedirectGuard.forceRedirect");
+      if (document.documentElement) document.documentElement.style.display = "none";
+
+      let retries = 0;
+      const tryRestorePath = () => {
+        let redirectUrl;
+        try {
+          const m = document.cookie.match(/(?:^|;\s*)__asgp=([^;]+)/);
+          if (m) {
+            const savedPath = decodeURIComponent(m[1]);
+            redirectUrl = new URL(savedPath, location.href).href;
+          }
+        } catch {}
+
+        if (redirectUrl) {
+          const exp = new Date();
+          exp.setFullYear(exp.getFullYear() + 1);
+          document.cookie = `geo=${targetCountry.toUpperCase()};domain=.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
+          document.cookie = "itspod=;domain=.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+          history.replaceState(history.state, "", redirectUrl);
+          if (document.documentElement) document.documentElement.style.display = "";
+        } else if (retries < 10) {
+          retries++;
+          setTimeout(tryRestorePath, 50);
+        } else {
+          const url = new URL(location.href);
+          url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
+          history.replaceState(history.state, "", url.href);
+          if (document.documentElement) document.documentElement.style.display = "";
+        }
+      };
+      tryRestorePath();
+    } catch {}
+  }
+
+  const enableSelection = () => {
+    if (document.getElementById("apple-store-copy-guard-style")) return;
+
+    const style = document.createElement("style");
+    style.id = "apple-store-copy-guard-style";
+    style.textContent = `
+      html, body, body * {
+        -webkit-user-select: text !important;
+        user-select: text !important;
       }
-      sessionStorage.removeItem(REDIRECT_KEY);
+    `;
+    (document.documentElement || document.head || document.body)?.append(style);
+  };
+
+  enableSelection();
+
+  for (const eventName of ["copy", "cut", "contextmenu", "selectstart"]) {
+    globalThis.addEventListener?.(eventName, (event) => event.stopImmediatePropagation(), true);
+  }
+
+  if (startCountry && startCountry !== "cn") {
+    try {
+      sessionStorage.setItem(COUNTRY_STORAGE_KEY, startCountry);
     } catch {}
   }
 
