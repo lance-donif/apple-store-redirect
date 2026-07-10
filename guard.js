@@ -5,6 +5,7 @@
   const APP_PATH = /^\/[a-z]{2}\/app\//i;
   const GUARD_MARKER = "__appleStoreRedirectGuard";
   const COUNTRY_STORAGE_KEY = "appleStoreRedirectGuard.country";
+  const APP_PATH_STORAGE_KEY = "appleStoreRedirectGuard.appPath";
   const SWITCHING_KEY = "appleStoreRedirectGuard.switching";
 
   const COUNTRIES = [
@@ -48,16 +49,81 @@
   ];
 
   const countryOf = (url) => url.pathname.match(COUNTRY_PATH)?.[1]?.toLowerCase() ?? null;
+  const applyStorefrontCookie = (code) => {
+    const date = new Date();
+    date.setFullYear(date.getFullYear() + 1);
+    document.cookie = `geo=${code.toUpperCase()};domain=.apple.com;path=/;expires=${date.toUTCString()};secure;samesite=none`;
+  };
+  const clearItspodCookie = () => {
+    document.cookie = "itspod=;domain=.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+  };
+  let targetCountry = null;
+  let pendingAppUrl = null;
+  const clearStoredAppPath = () => {
+    pendingAppUrl = null;
+    try { sessionStorage.removeItem(APP_PATH_STORAGE_KEY); } catch {}
+    try {
+      document.cookie = "__asgp=;domain=apps.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+    } catch {}
+  };
+  const clearStorefrontIntent = () => {
+    targetCountry = null;
+    try {
+      sessionStorage.removeItem(COUNTRY_STORAGE_KEY);
+      sessionStorage.setItem(SWITCHING_KEY, "1");
+    } catch {}
+    try {
+      document.cookie = "__asgc=;domain=apps.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+      document.cookie = "geo=;domain=.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+      document.cookie = "geo=;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+    } catch {}
+    clearStoredAppPath();
+  };
   const persistAppPath = (url) => {
-    const country = countryOf(url);
-    if (!country || country === "cn" || !APP_PATH.test(url.pathname)) return;
+    if (url.origin !== `https://${APPLE_HOST}`) return;
 
+    const country = countryOf(url);
+    if (!country) {
+      clearStorefrontIntent();
+      return;
+    }
+    if (country === "cn") return;
+
+    targetCountry = country;
+    try {
+      sessionStorage.setItem(COUNTRY_STORAGE_KEY, country);
+      sessionStorage.removeItem(SWITCHING_KEY);
+    } catch {}
     try {
       const exp = new Date();
       exp.setFullYear(exp.getFullYear() + 1);
+      applyStorefrontCookie(country);
+      clearItspodCookie();
       document.cookie = `__asgc=${country.toUpperCase()};domain=apps.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
-      document.cookie = `__asgp=${encodeURIComponent(url.pathname + url.search + url.hash)};domain=apps.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
     } catch {}
+
+    if (!APP_PATH.test(url.pathname)) {
+      clearStoredAppPath();
+      return;
+    }
+
+    pendingAppUrl = url.href;
+    const encodedPath = encodeURIComponent(url.pathname + url.search + url.hash);
+    try { sessionStorage.setItem(APP_PATH_STORAGE_KEY, encodedPath); } catch {}
+    try {
+      const exp = new Date();
+      exp.setFullYear(exp.getFullYear() + 1);
+      document.cookie = `__asgp=${encodedPath};domain=apps.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
+    } catch {}
+  };
+  const savedAppUrl = (value, country) => {
+    try {
+      const url = new URL(decodeURIComponent(value || ""), location.href);
+      if (url.origin !== `https://${APPLE_HOST}` || url.username || url.password || countryOf(url) !== country || !APP_PATH.test(url.pathname)) return null;
+      return url.href;
+    } catch {
+      return null;
+    }
   };
   const notifyRouteChange = () => {
     try {
@@ -74,16 +140,13 @@
   };
 
   const startUrl = new URL(location.href);
-  if (startUrl.hostname !== APPLE_HOST) return;
+  if (startUrl.origin !== `https://${APPLE_HOST}`) return;
   const startCountry = countryOf(startUrl);
-  persistAppPath(startUrl);
 
   let storedCountry = null;
   try {
     const country = sessionStorage.getItem(COUNTRY_STORAGE_KEY);
-    if (/^[a-z]{2}$/.test(country) && country !== "cn") {
-      storedCountry = country;
-    }
+    if (/^[a-z]{2}$/.test(country) && country !== "cn") storedCountry = country;
   } catch {}
   if (!storedCountry) {
     try {
@@ -104,7 +167,9 @@
     }
   } catch {}
 
-  const targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_PATH.test(startUrl.pathname) && !isSwitching ? storedCountry : null;
+  targetCountry = startCountry && startCountry !== "cn" ? startCountry : CHINA_PATH.test(startUrl.pathname) && !isSwitching ? storedCountry : null;
+  persistAppPath(startUrl);
+  let restoringInitialPath = startCountry === "cn" && Boolean(targetCountry);
 
   // If we landed on /cn/ due to server redirect, restore the original path before Apple boots.
   if (startCountry === "cn" && targetCountry) {
@@ -116,18 +181,18 @@
       const tryRestorePath = () => {
         let redirectUrl;
         try {
-          const m = document.cookie.match(/(?:^|;\s*)__asgp=([^;]+)/);
-          if (m) {
-            const savedPath = decodeURIComponent(m[1]);
-            redirectUrl = new URL(savedPath, location.href).href;
+          redirectUrl = savedAppUrl(sessionStorage.getItem(APP_PATH_STORAGE_KEY), targetCountry);
+          if (!redirectUrl) {
+            const m = document.cookie.match(/(?:^|;\s*)__asgp=([^;]+)/);
+            if (m) redirectUrl = savedAppUrl(m[1], targetCountry);
           }
         } catch {}
 
         if (redirectUrl) {
-          const exp = new Date();
-          exp.setFullYear(exp.getFullYear() + 1);
-          document.cookie = `geo=${targetCountry.toUpperCase()};domain=.apple.com;path=/;expires=${exp.toUTCString()};secure;samesite=none`;
-          document.cookie = "itspod=;domain=.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
+          restoringInitialPath = false;
+          pendingAppUrl = redirectUrl;
+          applyStorefrontCookie(targetCountry);
+          clearItspodCookie();
           history.replaceState(history.state, "", redirectUrl);
           notifyRouteChangeSoon();
           if (document.documentElement) document.documentElement.style.display = "";
@@ -135,6 +200,7 @@
           retries++;
           setTimeout(tryRestorePath, 50);
         } else {
+          restoringInitialPath = false;
           const url = new URL(location.href);
           url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
           history.replaceState(history.state, "", url.href);
@@ -143,16 +209,21 @@
         }
       };
       tryRestorePath();
-    } catch {}
+    } catch {
+      restoringInitialPath = false;
+      if (document.documentElement) document.documentElement.style.display = "";
+    }
   }
 
   addEventListener("click", (event) => {
     try {
+      if ((event.button != null && event.button !== 0) || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+
       const link = event.target?.closest?.("a[href]");
-      if (!link?.href) return;
+      if (!link?.href || (link.target && link.target.toLowerCase() !== "_self") || link.hasAttribute?.("download")) return;
 
       const url = new URL(link.href, location.href);
-      if (url.hostname === APPLE_HOST) persistAppPath(url);
+      if (url.origin === `https://${APPLE_HOST}`) persistAppPath(url);
     } catch {}
   }, true);
 
@@ -196,9 +267,14 @@
 
     try {
       const url = new URL(String(rawUrl), location.href);
-      if (url.hostname !== APPLE_HOST || !CHINA_PATH.test(url.pathname)) return rawUrl;
-      if (!targetCountry) return rawUrl;
+      if (url.origin !== `https://${APPLE_HOST}` || !CHINA_PATH.test(url.pathname)) return rawUrl;
+      if (restoringInitialPath || !targetCountry) return rawUrl;
       if (sessionStorage.getItem(SWITCHING_KEY)) return rawUrl;
+
+      if (pendingAppUrl) {
+        const appUrl = new URL(pendingAppUrl);
+        return typeof rawUrl === "string" ? appUrl.href : appUrl;
+      }
 
       // Replace /cn/ prefix with target country, preserve the rest of the path
       url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
@@ -209,11 +285,10 @@
   };
 
   const repairCurrentUrl = () => {
-    if (!targetCountry || !CHINA_PATH.test(location.pathname)) return;
+    if (restoringInitialPath || !targetCountry || !CHINA_PATH.test(location.pathname)) return;
 
-    const url = new URL(location.href);
-    url.pathname = url.pathname.replace(/^\/cn(?=\/|$)/i, `/${targetCountry}`);
-    history.replaceState(history.state, "", url.href);
+    const repairedUrl = guarded(location.href);
+    if (repairedUrl !== location.href) history.replaceState(history.state, "", repairedUrl);
   };
 
   for (const name of ["pushState", "replaceState"]) {
@@ -222,10 +297,14 @@
 
     Object.defineProperty(history, name, {
       configurable: true,
+      writable: true,
       value(...args) {
-        args[2] = guarded(args[2]);
+        const hasUrl = args[2] != null;
+        if (hasUrl) {
+          args[2] = guarded(args[2]);
+          try { persistAppPath(new URL(args[2], location.href)); } catch {}
+        }
         const result = original.apply(this, args);
-        try { persistAppPath(new URL(args[2] ?? location.href, location.href)); } catch {}
         repairCurrentUrl();
         return result;
       }
@@ -236,10 +315,11 @@
     const original = globalThis.navigation.navigate;
     Object.defineProperty(globalThis.navigation, "navigate", {
       configurable: true,
+      writable: true,
       value(url, options) {
         const nextUrl = guarded(url);
-        const result = original.call(this, nextUrl, options);
         try { persistAppPath(new URL(nextUrl, location.href)); } catch {}
+        const result = original.call(this, nextUrl, options);
         queueMicrotask(repairCurrentUrl);
         return result;
       }
@@ -253,16 +333,26 @@
     try {
       Object.defineProperty(Location.prototype, name, {
         configurable: true,
+        writable: true,
         value(url) {
-          return original.call(this, guarded(url));
+          const nextUrl = guarded(url);
+          try { persistAppPath(new URL(nextUrl, location.href)); } catch {}
+          return original.call(this, nextUrl);
         }
       });
     } catch {}
   }
 
-  addEventListener("popstate", repairCurrentUrl, true);
-  addEventListener("hashchange", repairCurrentUrl, true);
-  queueMicrotask(repairCurrentUrl);
+  const handleRouteChange = () => {
+    if (!CHINA_PATH.test(location.pathname)) {
+      try { persistAppPath(new URL(location.href)); } catch {}
+    }
+    repairCurrentUrl();
+  };
+
+  addEventListener("popstate", handleRouteChange, true);
+  addEventListener("hashchange", handleRouteChange, true);
+  queueMicrotask(handleRouteChange);
 
   const resolveNavTarget = () => {
     const nav = document.querySelector('nav[data-testid="navigation"]') || document.querySelector('nav');
@@ -272,16 +362,6 @@
     const target = nav.querySelector('[data-testid*="navigation"], [role="navigation"]');
     if (target) return target;
     return nav;
-  };
-
-  const applyStorefrontCookie = (code) => {
-    const date = new Date();
-    date.setFullYear(date.getFullYear() + 1);
-    document.cookie = `geo=${code.toUpperCase()};domain=.apple.com;path=/;expires=${date.toUTCString()};secure;samesite=none`;
-  };
-
-  const clearItspodCookie = () => {
-    document.cookie = "itspod=;domain=.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
   };
 
   const createCountrySwitcher = (activeCountry) => {
@@ -325,6 +405,7 @@
         try {
           if (country.code.toLowerCase() === "cn") {
             // Switching to CN: disable guard, clear our cookie
+            clearStoredAppPath();
             sessionStorage.removeItem(COUNTRY_STORAGE_KEY);
             sessionStorage.setItem(SWITCHING_KEY, "1");
             document.cookie = "__asgc=;domain=apps.apple.com;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT;secure;samesite=none";
@@ -358,7 +439,7 @@
   };
 
   const injectCountrySwitcher = () => {
-    const activeCountry = countryOf(new URL(location.href)) || targetCountry || "us";
+    const activeCountry = countryOf(new URL(location.href)) || targetCountry || storedCountry || "us";
     const existing = document.getElementById("apple-store-country-switcher");
     if (existing) {
       if (existing.dataset?.country === activeCountry && document.contains(existing)) return;
