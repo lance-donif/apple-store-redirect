@@ -19,6 +19,8 @@ assert.equal(manifest.content_scripts[2].js[0], "fanqie-copy.js");
 assert.equal(manifest.content_scripts[2].run_at, "document_start");
 assert.equal(manifest.content_scripts[2].world, "MAIN");
 assert.match(state, /clearCountryIntent/);
+assert.ok(!guard.includes("fetch response:"));
+assert.ok(!guard.includes("class DebugXHR"));
 assert.equal(manifest.declarative_net_request.rule_resources[0].path, "rules.json");
 assert.equal(manifest.background.service_worker, "background.js");
 assert.ok(manifest.permissions.includes("browsingData"));
@@ -60,13 +62,15 @@ assert.ok(manifest.permissions.includes("browsingData"));
 }
 assert.ok(!background.match(/X-Apple-Store-Front/i));
 assert.ok(!background.includes("operation: \"set\""));
-assert.ok(background.includes("removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID]"));
+assert.ok(background.includes("removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID, LEGACY_COUNTRY_REWRITE_RULE_ID]"));
 
 const rules = JSON.parse(await readFile("rules.json", "utf8"));
 assert.equal(rules[0].action.requestHeaders[0].header, "x-apple-store-front");
 assert.equal(rules[0].action.requestHeaders[0].operation, "remove");
-assert.equal(rules[0].condition.resourceTypes[0], "main_frame");
+assert.ok(rules[0].condition.resourceTypes.includes("main_frame"));
+assert.ok(rules[0].condition.resourceTypes.includes("xmlhttprequest"));
 assert.ok(!rules[0].action.requestHeaders.some((h) => h.header === "cookie"));
+assert.deepEqual(rules[1].condition.requestDomains, ["apps.apple.com"]);
 
 async function runBackgroundNavigations(urls, cookies = {}) {
   const cookieSets = [];
@@ -232,6 +236,42 @@ async function runBackgroundInstall(reason) {
 
   assert.deepEqual(savedPaths, [encodeURIComponent("/us/app/12-twelves/id6447656121")]);
   assert.ok(cookieRemovals.some((details) => details.name === "__asgp"));
+  assert.deepEqual(tabUpdates, [{
+    tabId: 1,
+    url: "https://apps.apple.com/us/app/12-twelves/id6447656121"
+  }]);
+}
+
+// TC-SWITCH-CN-US-001: returning from CN reloads US after the geo cookie is ready.
+{
+  const { cookieSets, tabUpdates } = await runBackgroundNavigations([
+    "https://apps.apple.com/us/iphone/today"
+  ], { geo: "CN" });
+
+  assert.ok(cookieSets.some((details) => details.name === "geo" && details.value === "US"));
+  assert.deepEqual(tabUpdates, [{
+    tabId: 1,
+    url: "https://apps.apple.com/us/iphone/today"
+  }]);
+}
+
+// TC-SWITCH-CN-US-002: the corrective reload does not loop once geo and guard are US.
+{
+  const { tabUpdates } = await runBackgroundNavigations([
+    "https://apps.apple.com/us/iphone/today"
+  ], { geo: "US", __asgc: "US" });
+
+  assert.deepEqual(tabUpdates, []);
+}
+
+// TC-SWITCH-CN-US-003: switching from CN does not trigger a duplicate reload
+// when the country menu already prepared matching cookies.
+{
+  const { tabUpdates } = await runBackgroundNavigations([
+    "https://apps.apple.com/cn/iphone/today",
+    "https://apps.apple.com/us/iphone/today"
+  ], { geo: "US", __asgc: "US" });
+
   assert.deepEqual(tabUpdates, []);
 }
 
@@ -299,7 +339,10 @@ async function runBackgroundInstall(reason) {
     { tabId: 1, url: "https://apps.apple.com/cn/iphone/today" }
   ]);
 
-  assert.deepEqual(tabUpdates, []);
+  assert.deepEqual(tabUpdates, [
+    { tabId: 1, url: "https://apps.apple.com/us/app/12-twelves/id6447656121" },
+    { tabId: 2, url: "https://apps.apple.com/jp/app/standland/id1033409631" }
+  ]);
 }
 
 // TC-NC-002: Countryless top-level navigation clears only that tab's stored intent.
@@ -310,7 +353,10 @@ async function runBackgroundInstall(reason) {
     "https://apps.apple.com/cn/iphone/today"
   ]);
 
-  assert.deepEqual(tabUpdates, []);
+  assert.deepEqual(tabUpdates, [{
+    tabId: 1,
+    url: "https://apps.apple.com/us/app/12-twelves/id6447656121"
+  }]);
   assert.deepEqual(JSON.parse(JSON.stringify(tabMessages)), [{ tabId: 1, message: { type: "clearCountryIntent" } }]);
 }
 
@@ -525,6 +571,7 @@ clickedAppNavigation.listeners.click[0]({
   }
 });
 
+assert.equal(clickedAppNavigation.context.location.href, "https://apps.apple.com/us/app/standland/id1033409631");
 assert.match(clickedAppNavigation.cookie, new RegExp(`__asgp=${encodeURIComponent("/us/app/standland/id1033409631")}`));
 assert.match(clickedAppNavigation.cookie, /geo=US/);
 assert.match(clickedAppNavigation.cookie, /itspod=;/);
@@ -551,6 +598,25 @@ assert.deepEqual(clickedAppNavigation.calls.at(-1), [
   "",
   "https://apps.apple.com/us/iphone/today"
 ]);
+
+let categoryDefaultPrevented = false;
+let categoryPropagationStopped = false;
+const sameStorefrontCategoryNavigation = runAt("https://apps.apple.com/jp/iphone/today");
+sameStorefrontCategoryNavigation.listeners.click[0]({
+  button: 0,
+  preventDefault() { categoryDefaultPrevented = true; },
+  stopImmediatePropagation() { categoryPropagationStopped = true; },
+  target: {
+    closest(selector) {
+      return selector === "a[href]"
+        ? { href: "https://apps.apple.com/jp/iphone/grouping/25241", target: "", hasAttribute() { return false; } }
+        : null;
+    }
+  }
+});
+assert.equal(categoryDefaultPrevented, true);
+assert.equal(categoryPropagationStopped, true);
+assert.equal(sameStorefrontCategoryNavigation.context.location.href, "https://apps.apple.com/jp/iphone/grouping/25241");
 
 const countrylessNavigation = runAt(
   "https://apps.apple.com/us/iphone/today",
@@ -835,6 +901,217 @@ assert.equal(cn.calls.length, 8);
   assert.equal(observed, true);
   assert.match(styles[0].textContent, /user-select:\s*text/);
   assert.equal(stopped, true);
+}
+
+// Test client-side routing loop protection
+{
+  const loopTest = runAt("https://apps.apple.com/us/app/12-twelves/id6447656121");
+  // The initial page load set the country intent to 'us'.
+  // Now we simulate the SPA repeatedly trying to transition to a 'cn' URL.
+  // The first 6 times, it should be successfully rewritten to the pending US app URL.
+  for (let i = 0; i < 6; i++) {
+    loopTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/example/id1");
+    assert.equal(loopTest.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
+  }
+  // The 7th time, the loop safeguard triggers.
+  // The URL should not be rewritten, and targetCountry/intent is cleared.
+  loopTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/example/id1");
+  assert.equal(loopTest.context.location.href, "https://apps.apple.com/cn/app/example/id1");
+}
+
+// Test background reload loop protection
+{
+  // We simulate 4 consecutive navigations to the same JP URL on tab 1.
+  // We mock chrome.cookies.get to always return a geo value of 'cn',
+  // which forces needsReload to be true every time.
+  const cookieSets = [];
+  const cookieRemovals = [];
+  const tabUpdates = [];
+  const cookieJar = new Map();
+  let listener;
+  const context = {
+    URL,
+    chrome: {
+      cookies: {
+        set(details) {
+          cookieSets.push(details);
+          cookieJar.set(details.name, details.value);
+          return Promise.resolve(details);
+        },
+        get(details) {
+          // Always return 'cn' for geo to simulate a reload loop scenario
+          if (details.name === "geo") return Promise.resolve({ value: "cn" });
+          const value = cookieJar.get(details.name);
+          return Promise.resolve(value == null ? null : { value });
+        },
+        remove(details) {
+          cookieRemovals.push(details);
+          cookieJar.delete(details.name);
+          return Promise.resolve();
+        }
+      },
+      tabs: {
+        sendMessage() { return Promise.resolve(); },
+        update(tabId, details) {
+          tabUpdates.push({ tabId, ...details });
+          return Promise.resolve(details);
+        }
+      },
+      declarativeNetRequest: { updateSessionRules() { return Promise.resolve(); } },
+      browsingData: { remove() { return Promise.resolve(); } },
+      runtime: { onInstalled: { addListener() {} } },
+      webNavigation: { onBeforeNavigate: { addListener(cb) { listener = cb; } } }
+    }
+  };
+  vm.runInNewContext(background, context);
+
+  // Trigger 4 navigations to the same US URL
+  const nav = { frameId: 0, tabId: 1, url: "https://apps.apple.com/us/app/12-twelves/id6447656121" };
+  await listener(nav);
+  await listener(nav);
+  await listener(nav);
+  // Total 3 updates triggered so far
+  assert.equal(tabUpdates.length, 3);
+
+  // The 4th navigation triggers the safeguard, clearing cookies and NOT updating the tab again
+  await listener(nav);
+  assert.equal(tabUpdates.length, 3); // Still 3, no 4th update
+
+  // Verify that the safeguard removed the guard/intent cookies
+  const removedNames = cookieRemovals.map(d => d.name);
+  assert.ok(removedNames.includes("__asgp"));
+  assert.ok(removedNames.includes("__asgc"));
+  assert.ok(removedNames.includes("geo"));
+}
+
+// Test switching from CN to JP via menu
+{
+  const switchFromCnToJp = runAt(
+    "https://apps.apple.com/cn/app/example/id1",
+    {},
+    "",
+    false,
+    true
+  );
+  const jpMenuItem = switchFromCnToJp.styles.find((element) => element.innerHTML?.includes("日本"));
+  assert.ok(jpMenuItem);
+  jpMenuItem.onclick();
+
+  // Verify storage has target country
+  assert.equal(switchFromCnToJp.session.get("appleStoreRedirectGuard.country"), "jp");
+  // Verify cookie contains __asgc=JP
+  assert.match(switchFromCnToJp.cookie, /__asgc=JP/);
+  // Verify host-specific geo cookie is cleared first (so geo=; is present)
+  assert.match(switchFromCnToJp.cookie, /geo=;/);
+  // Verify domain-specific geo cookie is set to JP
+  assert.match(switchFromCnToJp.cookie, /geo=JP/);
+  // Verify navigation targeted JP URL
+  assert.equal(switchFromCnToJp.context.location.href, "https://apps.apple.com/jp/app/example/id1");
+}
+
+// TC-REWRITE-001: navigating to a non-CN page installs a session rule that
+// rewrites /cn/ API requests to the target country.
+{
+  const sessionRuleCalls = [];
+  const cookieJar = new Map();
+  let listener;
+  const context = {
+    URL,
+    chrome: {
+      cookies: {
+        set(details) {
+          cookieJar.set(details.name, details.value);
+          return Promise.resolve(details);
+        },
+        get(details) {
+          const value = cookieJar.get(details.name);
+          return Promise.resolve(value == null ? null : { value });
+        },
+        remove(details) {
+          cookieJar.delete(details.name);
+          return Promise.resolve();
+        }
+      },
+      tabs: {
+        sendMessage() { return Promise.resolve(); },
+        update(tabId, details) {
+          return Promise.resolve(details);
+        }
+      },
+      declarativeNetRequest: {
+        updateSessionRules(details) {
+          sessionRuleCalls.push(details);
+          return Promise.resolve();
+        }
+      },
+      browsingData: { remove() { return Promise.resolve(); } },
+      runtime: { onInstalled: { addListener() {} } },
+      webNavigation: {
+        onBeforeNavigate: { addListener(cb) { listener = cb; } }
+      }
+    }
+  };
+
+  vm.runInNewContext(background, context);
+  await listener({ frameId: 0, tabId: 1, url: "https://apps.apple.com/jp/iphone/today" });
+
+  const lastCall = sessionRuleCalls[sessionRuleCalls.length - 1];
+  assert.ok(lastCall.addRules, "expected addRules to be present, got: " + JSON.stringify(sessionRuleCalls));
+  assert.equal(lastCall.addRules.length, 1);
+  const rewriteRule = lastCall.addRules[0];
+  assert.equal(rewriteRule.action.type, "redirect");
+  assert.ok(rewriteRule.action.redirect, "redirect property missing from action");
+  assert.equal(rewriteRule.action.redirect.regexSubstitution, "https://apps.apple.com/jp\\1");
+  assert.equal(rewriteRule.condition.regexFilter, "^https://apps\\.apple\\.com/cn(/.*)$");
+  assert.deepEqual(Array.from(rewriteRule.condition.tabIds), [1]);
+  assert.equal(rewriteRule.id, 10000);
+  assert.ok(rewriteRule.condition.resourceTypes.includes("xmlhttprequest"));
+}
+
+// TC-CN-GEO-001: navigating to CN does NOT change the geo cookie,
+// so the geo stays matching the fake IP (non-CN).
+{
+  const cookieJar = new Map([["geo", "US"], ["__asgc", "US"]]);
+  const cookieSets = [];
+  let listener;
+  const context = {
+    URL,
+    chrome: {
+      cookies: {
+        set(details) {
+          cookieSets.push(details);
+          cookieJar.set(details.name, details.value);
+          return Promise.resolve(details);
+        },
+        get(details) {
+          const value = cookieJar.get(details.name);
+          return Promise.resolve(value == null ? null : { value });
+        },
+        remove(details) {
+          cookieJar.delete(details.name);
+          return Promise.resolve();
+        }
+      },
+      tabs: {
+        sendMessage() { return Promise.resolve(); },
+        update() { return Promise.resolve(); }
+      },
+      declarativeNetRequest: {
+        updateSessionRules() { return Promise.resolve(); }
+      },
+      browsingData: { remove() { return Promise.resolve(); } },
+      runtime: { onInstalled: { addListener() {} } },
+      webNavigation: {
+        onBeforeNavigate: { addListener(cb) { listener = cb; } }
+      }
+    }
+  };
+
+  vm.runInNewContext(background, context);
+  await listener({ frameId: 0, tabId: 1, url: "https://apps.apple.com/cn/iphone/today" });
+
+  // geo cookie should NOT be set to CN
+  assert.equal(cookieJar.get("geo"), "US", "geo should stay US (matching fake IP) when navigating to CN");
 }
 
 console.log("ok");
