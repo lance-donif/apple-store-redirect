@@ -13,7 +13,28 @@
     },
     "condition": {
       "urlFilter": "||apps.apple.com/",
-      "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest"]
+      "resourceTypes": [
+        "main_frame",
+        "xmlhttprequest",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 100,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "processRedirectUrl",
+      "resourceTypes": [
+        "xmlhttprequest",
+        "sub_frame"
+      ],
+      "requestDomains": [
+        "apps.apple.com"
+      ]
     }
   }
 ]

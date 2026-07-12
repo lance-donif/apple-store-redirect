@@ -1,6 +1,10 @@
 {
   "type": "module",
   "scripts": {
-    "test": "node test.mjs"
+    "test": "node test.mjs",
+    "test:browser": "node puppeteer-test.mjs"
+  },
+  "devDependencies": {
+    "puppeteer": "^25.3.0"
   }
 }
