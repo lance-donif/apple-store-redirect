@@ -319,11 +319,23 @@
         return rawUrl;
       }
 
-      let result = pendingAppUrl;
-      if (!result) {
+      // A saved App page only stands in for a bounce back to that same App. Any other
+      // route — including a link to a different App — keeps its own path with the
+      // storefront swapped, so SPA navigation is never hijacked onto a stale App.
+      const withoutCountry = (pathname) => pathname.replace(COUNTRY_PATH, "/");
+      const sameAppAsPending = () => {
+        if (!pendingAppUrl || !APP_PATH.test(url.pathname)) return false;
+        try {
+          return withoutCountry(new URL(pendingAppUrl).pathname) === withoutCountry(url.pathname);
+        } catch {
+          return false;
+        }
+      };
+      const targetUrl = () => {
         url.pathname = url.pathname.replace(CHINA_PATH, `/${targetCountry}`);
-        result = url.href;
-      }
+        return url.href;
+      };
+      const result = sameAppAsPending() ? pendingAppUrl : targetUrl();
 
       const inputStr = String(rawUrl);
       if (lastGuardedInput === inputStr && lastGuardedOutput === result) {

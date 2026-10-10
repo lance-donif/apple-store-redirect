@@ -25,6 +25,22 @@ assert.equal(manifest.declarative_net_request.rule_resources[0].path, "rules.jso
 assert.equal(manifest.background.service_worker, "background.js");
 assert.ok(manifest.permissions.includes("browsingData"));
 
+// Every domain background.js clears cookies on must be a host permission, or
+// those removals are rejected at runtime and fail silently.
+{
+  const clearedUrls = [...background.matchAll(/removeCookie\((\w+), (\w+)\)|"https:\/\/([a-z.]*apple\.com)\/"/g)]
+    .map((match) => match[3])
+    .filter(Boolean);
+  assert.ok(clearedUrls.includes("itunes.apple.com"));
+  assert.ok(clearedUrls.includes("apple.com"));
+  for (const host of clearedUrls) {
+    assert.ok(
+      manifest.host_permissions.includes(`https://${host}/*`),
+      `${host} is cleared in background.js but missing from host_permissions`
+    );
+  }
+}
+
 // TC-STATE-001: Background can clear only the target tab's country intent.
 {
   const values = new Map([
@@ -536,6 +552,9 @@ us.context.history.pushState({}, "", "/cn/iphone/today");
 us.context.navigation.navigate("https://apps.apple.com/cn/iphone/today");
 us.context.history.replaceState({}, "", "https://apps.apple.com/us/iphone/today");
 
+// The saved App page only stands in for a bounce to an App page. A /cn/ route
+// that is not an App page keeps its own path, so navigating away from an App
+// page is never dragged back to it.
 assert.deepEqual(us.calls, [
   ["addEventListener", "click"],
   ["addEventListener", "copy"],
@@ -544,9 +563,9 @@ assert.deepEqual(us.calls, [
   ["addEventListener", "selectstart"],
   ["addEventListener", "popstate"],
   ["addEventListener", "hashchange"],
-  ["replaceState", {}, "", "https://apps.apple.com/us/app/12-twelves/id6447656121"],
-  ["pushState", {}, "", "https://apps.apple.com/us/app/12-twelves/id6447656121"],
-  ["navigate", "https://apps.apple.com/us/app/12-twelves/id6447656121", undefined],
+  ["replaceState", {}, "", "https://apps.apple.com/us/iphone/today"],
+  ["pushState", {}, "", "https://apps.apple.com/us/iphone/today"],
+  ["navigate", "https://apps.apple.com/us/iphone/today", undefined],
   ["replaceState", {}, "", "https://apps.apple.com/us/iphone/today"]
 ]);
 assert.match(us.styles[0].textContent, /user-select:\s*text/);
@@ -557,6 +576,22 @@ assert.equal(Object.getOwnPropertyDescriptor(us.context.navigation, "navigate").
 assert.equal(Object.getOwnPropertyDescriptor(us.context.Location.prototype, "assign").writable, true);
 assert.equal(us.session.get("appleStoreRedirectGuard.country"), "us");
 assert.equal(us.local.size, 1); // localStorage is no longer cleared (it breaks Apple's PWA bootstrap)
+
+// TC-GUARD-APP-HIJACK-001: on an App page, a /cn/ route that is not an App page
+// must keep its own path instead of being rewritten back to the remembered App.
+{
+  const hijack = runAt("https://apps.apple.com/gb/app/facebook/id284882215");
+  hijack.context.history.pushState({}, "", "/cn/iphone/apps");
+  assert.equal(hijack.context.location.href, "https://apps.apple.com/gb/iphone/apps");
+  hijack.context.history.pushState({}, "", "/cn/iphone/music");
+  assert.equal(hijack.context.location.href, "https://apps.apple.com/gb/iphone/music");
+  // A bounce back to the same App restores it; a link to a different App keeps
+  // its own path and only swaps the storefront.
+  hijack.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/other/id999");
+  assert.equal(hijack.context.location.href, "https://apps.apple.com/gb/app/other/id999");
+  hijack.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/facebook/id284882215");
+  assert.equal(hijack.context.location.href, "https://apps.apple.com/gb/app/facebook/id284882215");
+}
 
 const clickedAppNavigation = runAt(
   "https://apps.apple.com/us/iphone/today",
@@ -577,7 +612,16 @@ assert.match(clickedAppNavigation.cookie, /geo=US/);
 assert.match(clickedAppNavigation.cookie, /itspod=;/);
 assert.match(clickedAppNavigation.cookie, /__asgp=;/);
 clickedAppNavigation.context.history.replaceState({}, "");
+// A /cn/ category route is not a bounce back to the App, so it keeps its path.
 clickedAppNavigation.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
+assert.deepEqual(clickedAppNavigation.calls.at(-1), [
+  "replaceState",
+  {},
+  "",
+  "https://apps.apple.com/us/iphone/today"
+]);
+// A /cn/ bounce back to that same App restores it.
+clickedAppNavigation.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/standland/id1033409631");
 assert.deepEqual(clickedAppNavigation.calls.at(-1), [
   "replaceState",
   {},
@@ -700,6 +744,11 @@ popstateAppNavigation.listeners.click[0]({
 });
 popstateAppNavigation.context.location.href = "https://apps.apple.com/cn/iphone/today";
 popstateAppNavigation.listeners.popstate[0]();
+assert.equal(popstateAppNavigation.context.location.href, "https://apps.apple.com/us/iphone/today");
+
+// A popstate bounce back to the same App still restores it.
+popstateAppNavigation.context.location.href = "https://apps.apple.com/cn/app/standland/id1033409631";
+popstateAppNavigation.listeners.popstate[0]();
 assert.equal(popstateAppNavigation.context.location.href, "https://apps.apple.com/us/app/standland/id1033409631");
 
 const locationAppNavigation = runAt(
@@ -718,6 +767,12 @@ locationAppNavigation.context.Location.prototype.assign.call(
   locationAppNavigation.context.location,
   "https://apps.apple.com/cn/iphone/today"
 );
+assert.equal(locationAppNavigation.context.location.href, "https://apps.apple.com/us/iphone/today");
+
+locationAppNavigation.context.Location.prototype.assign.call(
+  locationAppNavigation.context.location,
+  "https://apps.apple.com/cn/app/standland/id1033409631"
+);
 assert.equal(locationAppNavigation.context.location.href, "https://apps.apple.com/us/app/standland/id1033409631");
 
 const spaAppNavigation = runAt(
@@ -732,6 +787,7 @@ assert.match(spaAppNavigation.cookie, new RegExp(`__asgp=${encodeURIComponent("/
 const jp = runAt("https://apps.apple.com/jp/app/%E5%9B%B3%E5%BD%A2%E9%9B%BB%E5%8D%93-shapeinfo-plus/id983851989");
 jp.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
 
+// A category route keeps its own path; only a bounce to this same App restores it.
 assert.deepEqual(jp.calls, [
   ["addEventListener", "click"],
   ["addEventListener", "copy"],
@@ -740,7 +796,14 @@ assert.deepEqual(jp.calls, [
   ["addEventListener", "selectstart"],
   ["addEventListener", "popstate"],
   ["addEventListener", "hashchange"],
-  ["replaceState", {}, "", "https://apps.apple.com/jp/app/%E5%9B%B3%E5%BD%A2%E9%9B%BB%E5%8D%93-shapeinfo-plus/id983851989"]
+  ["replaceState", {}, "", "https://apps.apple.com/jp/iphone/today"]
+]);
+jp.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/%E5%9B%B3%E5%BD%A2%E9%9B%BB%E5%8D%93-shapeinfo-plus/id983851989");
+assert.deepEqual(jp.calls.at(-1), [
+  "replaceState",
+  {},
+  "",
+  "https://apps.apple.com/jp/app/%E5%9B%B3%E5%BD%A2%E9%9B%BB%E5%8D%93-shapeinfo-plus/id983851989"
 ]);
 
 const redirectedCnToday = runAt("https://apps.apple.com/cn/iphone/today", {
@@ -781,7 +844,8 @@ const restoredAppPath = runAt(
 );
 
 assert.equal(restoredAppPath.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
-restoredAppPath.context.history.replaceState({}, "", "https://apps.apple.com/cn/iphone/today");
+// Once restored onto the App, a bounce back to that same App keeps the user there.
+restoredAppPath.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/12-twelves/id6447656121");
 assert.equal(restoredAppPath.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
 assert.equal(restoredAppPath.calls[0][0], "replaceState");
 assert.equal(restoredAppPath.session.has("appleStoreRedirectGuard.forceRedirect"), false);
@@ -906,17 +970,26 @@ assert.equal(cn.calls.length, 8);
 // Test client-side routing loop protection
 {
   const loopTest = runAt("https://apps.apple.com/us/app/12-twelves/id6447656121");
-  // The initial page load set the country intent to 'us'.
-  // Now we simulate the SPA repeatedly trying to transition to a 'cn' URL.
-  // The first 6 times, it should be successfully rewritten to the pending US app URL.
+  // Apple repeatedly bounces the tab back to the /cn/ form of the same App.
+  // The first 6 times it is rewritten back to the US App; the 7th trips the guard.
   for (let i = 0; i < 6; i++) {
-    loopTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/example/id1");
+    loopTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/12-twelves/id6447656121");
     assert.equal(loopTest.context.location.href, "https://apps.apple.com/us/app/12-twelves/id6447656121");
   }
   // The 7th time, the loop safeguard triggers.
   // The URL should not be rewritten, and targetCountry/intent is cleared.
-  loopTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/example/id1");
-  assert.equal(loopTest.context.location.href, "https://apps.apple.com/cn/app/example/id1");
+  loopTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/12-twelves/id6447656121");
+  assert.equal(loopTest.context.location.href, "https://apps.apple.com/cn/app/12-twelves/id6447656121");
+
+  // A different App is never hijacked onto the remembered one. It is rewritten
+  // on its own path, and only trips the loop guard if Apple keeps insisting.
+  const freshTest = runAt("https://apps.apple.com/us/app/12-twelves/id6447656121");
+  for (let i = 0; i < 6; i++) {
+    freshTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/example/id1");
+    assert.equal(freshTest.context.location.href, "https://apps.apple.com/us/app/example/id1");
+  }
+  freshTest.context.history.replaceState({}, "", "https://apps.apple.com/cn/app/example/id1");
+  assert.equal(freshTest.context.location.href, "https://apps.apple.com/cn/app/example/id1");
 }
 
 // Test background reload loop protection

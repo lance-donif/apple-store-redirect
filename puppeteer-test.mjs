@@ -75,9 +75,15 @@ async function switchCountry(page, code) {
 
 try {
   await wait(1200);
-  const serviceWorkerTarget = browser.targets().find(
+  // The MV3 worker starts lazily, so poll instead of assuming a fixed delay.
+  const findServiceWorker = () => browser.targets().find(
     (target) => target.type() === "service_worker" && target.url().endsWith("/background.js")
   );
+  let serviceWorkerTarget;
+  for (let attempt = 0; attempt < 40 && !serviceWorkerTarget; attempt++) {
+    serviceWorkerTarget = findServiceWorker();
+    if (!serviceWorkerTarget) await wait(250);
+  }
   assert.ok(serviceWorkerTarget, "extension service worker should be running");
   const worker = await serviceWorkerTarget.worker();
 
@@ -169,6 +175,16 @@ try {
   await appNavigation;
   assert.match(new URL(page.url()).pathname, /^\/jp\/app\//);
   assert.deepEqual(catalogStatuses.slice(catalogRequestStart), []);
+
+  // On an App page, a /cn/ route that is not an App must keep its own path
+  // instead of being rewritten back to the App the guard remembers.
+  await page.evaluate(() => history.pushState({}, "", "/cn/iphone/apps"));
+  assert.equal(new URL(page.url()).pathname, "/jp/iphone/apps");
+  await page.evaluate(() => history.pushState({}, "", "/cn/app/other/id999"));
+  assert.equal(new URL(page.url()).pathname, "/jp/app/other/id999");
+  // A bounce back to the same App is still restored.
+  await page.evaluate((href) => history.pushState({}, "", `/cn${new URL(href).pathname.slice(3)}`), appHref);
+  assert.equal(new URL(page.url()).pathname, new URL(appHref).pathname);
 
   const secondPage = await browser.newPage();
   await navigate(secondPage, "https://apps.apple.com/us/iphone/today", "us");
