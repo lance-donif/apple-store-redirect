@@ -115,20 +115,62 @@ try {
   assert.match(gbState.cookie, /(?:^|; )geo=GB(?:;|$)/);
   assert.match(gbState.cookie, /(?:^|; )__asgc=GB(?:;|$)/);
 
+  // Environment precondition. Apple serves the storefront its network egress
+  // implies and 302s every other country path, so from an egress it reads as
+  // China the whole page collapses to /cn/ and this suite cannot exercise
+  // storefront switching at all. Detect that up front and say so, instead of
+  // timing out on a selector three steps later.
+  const contentProfile = () => page.evaluate(() => {
+    const paths = [...document.querySelectorAll('a[href*="apps.apple.com"]')]
+      .slice(0, 60)
+      .map((a) => { try { return new URL(a.href).pathname; } catch { return ""; } });
+    return {
+      lang: document.documentElement.lang,
+      gb: paths.filter((p) => p.startsWith("/gb/")).length,
+      cn: paths.filter((p) => p.startsWith("/cn/")).length
+    };
+  });
+  const firstProfile = await contentProfile();
+  assert.ok(
+    !/^zh/i.test(firstProfile.lang) && firstProfile.cn <= firstProfile.gb,
+    `Apple is forcing the CN storefront from this network egress (lang=${firstProfile.lang}, gb links=${firstProfile.gb}, cn links=${firstProfile.cn}). ` +
+    "The extension cannot override a server-side storefront decision — check the proxy routing for *.apple.com before trusting this suite."
+  );
+
+  // One helper for both match assertions: testMatchOutcome reports static and
+  // session rules together, so filter to the per-tab session rule under test.
+  const matchSessionRule = async (url, type) => {
+    const outcome = await worker.evaluate(async (request) => {
+      const [rule] = await chrome.declarativeNetRequest.getSessionRules();
+      return chrome.declarativeNetRequest.testMatchOutcome({
+        url: request.url,
+        type: request.type,
+        tabId: rule.condition.tabIds[0]
+      });
+    }, { url, type });
+    return outcome.matchedRules.filter((r) => r.rulesetId === "_session").length;
+  };
+
   let rules = await worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules());
   assert.equal(rules.length, 1);
   assert.equal(rules[0].action.redirect.regexSubstitution, "https://apps.apple.com/gb\\1");
   assert.deepEqual(rules[0].condition.resourceTypes.sort(), ["sub_frame", "xmlhttprequest"]);
   assert.equal(rules[0].condition.tabIds.length, 1);
-  const matchOutcome = await worker.evaluate(async () => {
-    const [rule] = await chrome.declarativeNetRequest.getSessionRules();
-    return chrome.declarativeNetRequest.testMatchOutcome({
-      url: "https://apps.apple.com/cn/iphone/today",
-      type: "xmlhttprequest",
-      tabId: rule.condition.tabIds[0]
-    });
-  });
-  assert.equal(matchOutcome.matchedRules.length, 1);
+  assert.equal(await matchSessionRule("https://apps.apple.com/cn/iphone/today", "xmlhttprequest"), 1);
+
+  // main_frame is intentionally excluded from the *country rewrite* rule: Apple
+  // 302s /gb/... -> /cn when it disagrees with the client storefront, and
+  // rewriting that top-level request back loops until ERR_TOO_MANY_REDIRECTS.
+  assert.equal(
+    await matchSessionRule("https://apps.apple.com/cn/app/example/id1", "main_frame"),
+    0,
+    "main_frame must not be rewritten (redirect loop risk)"
+  );
+
+  // The rendered body must match the storefront in the URL, not the IP.
+  const gbContent = await contentProfile();
+  assert.ok(!/^zh/i.test(gbContent.lang), `GB storefront rendered lang=${gbContent.lang}`);
+  assert.ok(gbContent.cn < 20, `GB storefront body carries ${gbContent.cn} CN links`);
 
   await page.evaluate(() => history.pushState({}, "", "/cn/iphone/today"));
   assert.equal(new URL(page.url()).pathname, "/gb/iphone/today");
@@ -147,7 +189,13 @@ try {
 
   const jpNavigationStart = mainNavigations.length;
   await switchCountry(page, "JP");
-  assert.deepEqual(mainNavigations.slice(jpNavigationStart), ["https://apps.apple.com/jp/iphone/today"]);
+  // Apple answers a country path it disagrees with by 302-ing to the storefront
+  // it believes in (`/jp/...` -> `/cn` -> `/cn/iphone/today`) when the network
+  // egress reads as China. That is server behaviour, not a duplicate reload, so
+  // assert on the navigations the extension itself caused.
+  const storefrontBounce = (url) => /^https:\/\/apps\.apple\.com\/cn(\/|$)/.test(url);
+  const selfCausedNavigations = mainNavigations.slice(jpNavigationStart).filter((url) => !storefrontBounce(url));
+  assert.deepEqual(selfCausedNavigations, ["https://apps.apple.com/jp/iphone/today"]);
   const jpState = await page.evaluate(() => ({
     guard: globalThis.__appleStoreRedirectGuard,
     switcher: document.querySelector("#apple-store-country-switcher button")?.textContent,

@@ -1139,6 +1139,16 @@ assert.equal(cn.calls.length, 8);
   assert.deepEqual(Array.from(rewriteRule.condition.tabIds), [1]);
   assert.equal(rewriteRule.id, 10000);
   assert.ok(rewriteRule.condition.resourceTypes.includes("xmlhttprequest"));
+  assert.ok(rewriteRule.condition.resourceTypes.includes("sub_frame"));
+  // main_frame must stay OUT. Apple answers /gb/... with 302 -> /cn when it
+  // disagrees with the client's storefront; rewriting that top-level /cn/
+  // request back to /gb/ makes the two ping-pong forever and the tab dies with
+  // ERR_TOO_MANY_REDIRECTS. Verified live in a browser. XHR/sub_frame rewrites
+  // cannot loop this way.
+  assert.ok(
+    !rewriteRule.condition.resourceTypes.includes("main_frame"),
+    "main_frame in the country rewrite rule causes an infinite redirect loop"
+  );
 }
 
 // TC-CN-GEO-001: navigating to CN does NOT change the geo cookie,

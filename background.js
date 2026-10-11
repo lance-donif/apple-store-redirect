@@ -83,6 +83,14 @@ const buildCountryRewriteRule = (id, code, tabId) => ({
     redirect: { regexSubstitution: `https://apps.apple.com/${code}\\1` }
   },
   condition: {
+    // Deliberately NOT main_frame. Apple decides the storefront from the
+    // client's egress and answers /gb/... with 302 -> /cn when it disagrees.
+    // Rewriting that top-level /cn/ request back to /gb/ makes the two fight:
+    // Apple 302s to /cn, we 307 back to /gb, forever -> ERR_TOO_MANY_REDIRECTS.
+    // A hard error page is worse than the CN content it was trying to fix, and
+    // no redirect target avoids it because Apple rejects every other country
+    // path equally. XHR/sub_frame rewrites stay: they can't loop this way and
+    // are what keeps a rendered page on its storefront.
     regexFilter: "^https://apps\\.apple\\.com/cn(/.*)$",
     resourceTypes: ["xmlhttprequest", "sub_frame"],
     tabIds: [tabId]
