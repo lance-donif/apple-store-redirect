@@ -28,6 +28,9 @@ const APPLE_STORE_CACHE_TYPES = {
   serviceWorkers: true,
   webSQL: true
 };
+// Module-level: built once instead of on every rule creation.
+const COUNTRY_REWRITE_FILTER =
+  `^https://${APPLE_APPS_HOST.replace(/\./g, "\\.")}/cn(/.*)$`;
 
 chrome.declarativeNetRequest.updateSessionRules({
   removeRuleIds: [LEGACY_STORE_FRONT_RULE_ID, LEGACY_COUNTRY_REWRITE_RULE_ID]
@@ -80,7 +83,7 @@ const buildCountryRewriteRule = (id, code, tabId) => ({
   priority: 200,
   action: {
     type: "redirect",
-    redirect: { regexSubstitution: `https://apps.apple.com/${code}\\1` }
+    redirect: { regexSubstitution: `https://${APPLE_APPS_HOST}/${code}\\1` }
   },
   condition: {
     // Deliberately NOT main_frame. Apple decides the storefront from the
@@ -91,7 +94,7 @@ const buildCountryRewriteRule = (id, code, tabId) => ({
     // no redirect target avoids it because Apple rejects every other country
     // path equally. XHR/sub_frame rewrites stay: they can't loop this way and
     // are what keeps a rendered page on its storefront.
-    regexFilter: "^https://apps\\.apple\\.com/cn(/.*)$",
+    regexFilter: COUNTRY_REWRITE_FILTER,
     resourceTypes: ["xmlhttprequest", "sub_frame"],
     tabIds: [tabId]
   }
@@ -132,6 +135,13 @@ function updateCountryRewriteRule(country, tabId) {
     .then(() => applyCountryRewriteRule(country, tabId));
   return countryRuleUpdateQueue;
 }
+
+// Guard off = drop the intent cookies and stop rewriting this tab's requests.
+const deactivateGuardOperations = (tabId) => [
+  clearGuardCountryCookie(),
+  clearGuardPathCookie(),
+  updateCountryRewriteRule(null, tabId)
+];
 
 const clearStorefrontState = (tabId) =>
   Promise.allSettled([
@@ -175,7 +185,7 @@ chrome.runtime.onMessage?.addListener((message, sender, sendResponse) => {
   (async () => {
     const operations = [setGeoCookie(country), clearItspodCookie()];
     if (country === "cn") {
-      operations.push(clearGuardCountryCookie(), clearGuardPathCookie(), updateCountryRewriteRule(null, tabId));
+      operations.push(...deactivateGuardOperations(tabId));
     } else {
       operations.push(setGuardCookie(country), updateCountryRewriteRule(country, tabId));
     }
@@ -195,40 +205,32 @@ const storefrontOf = (url) => url.pathname.match(COUNTRY_PATH)?.[1]?.toLowerCase
 function shouldReloadTab(tabId, requestedUrl) {
   const now = Date.now();
   const previous = reloadAttempts.get(tabId);
-  const inLoop = previous?.url === requestedUrl && now - previous.lastTime < RELOAD_LOOP_WINDOW_MS;
-  const state = inLoop
-    ? { url: requestedUrl, count: previous.count + 1, lastTime: now }
-    : { url: requestedUrl, count: 1, lastTime: now };
-  reloadAttempts.set(tabId, state);
+  const repeating =
+    previous?.url === requestedUrl && now - previous.lastTime < RELOAD_LOOP_WINDOW_MS;
+  const count = repeating ? previous.count + 1 : 1;
+  reloadAttempts.set(tabId, { url: requestedUrl, count, lastTime: now });
 
-  if (state.count <= MAX_RELOADS_PER_URL) return true;
+  if (count <= MAX_RELOADS_PER_URL) return true;
 
   console.warn(`[Redirect Guard] Prevented reload loop on tab ${tabId} for URL ${requestedUrl}`);
   reloadAttempts.delete(tabId);
   return false;
 }
 
-async function handleStorefrontNavigation(details) {
-  if (details.frameId !== 0) return;
+const notifyClearIntent = async (tabId) => {
+  try { await chrome.tabs.sendMessage?.(tabId, { type: "clearCountryIntent" }); } catch {}
+};
 
-  const url = new URL(details.url);
-  if (url.origin !== APPLE_ORIGIN) return;
+// Countryless path: no storefront in play, reset everything for this tab.
+async function handleCountrylessNavigation(tabId) {
+  await notifyClearIntent(tabId);
+  forgetTab(tabId);
+  await clearStorefrontState(tabId);
+}
 
-  const country = storefrontOf(url);
-  if (!country) {
-    try { await chrome.tabs.sendMessage?.(details.tabId, { type: "clearCountryIntent" }); } catch {}
-    forgetTab(details.tabId);
-    await clearStorefrontState(details.tabId);
-    return;
-  }
-
-  const wasPrepared = preparedCountryByTab.get(details.tabId) === country;
-  preparedCountryByTab.delete(details.tabId);
-  if (country === "cn") {
-    await Promise.allSettled([clearItspodCookie(), updateCountryRewriteRule(null, details.tabId)]);
-    return;
-  }
-
+// Non-CN storefront: mirror the intent cookies, then reload once so the fresh
+// cookies can influence the request Apple already answered.
+async function syncStorefront(country, url, tabId, wasPrepared, requestedUrl) {
   const [currentGeo, guardCookie] = await Promise.all([
     chrome.cookies.get({ url: APPLE_URL, name: GEO_COOKIE }),
     chrome.cookies.get({ url: APPLE_URL, name: GUARD_COUNTRY_COOKIE })
@@ -242,21 +244,41 @@ async function handleStorefrontNavigation(details) {
     setGeoCookie(country),
     setGuardCookie(country),
     clearItspodCookie(),
-    updateCountryRewriteRule(country, details.tabId),
+    updateCountryRewriteRule(country, tabId),
     APP_PATH.test(url.pathname)
       ? setGuardPathCookie(encodeURIComponent(url.pathname + url.search + url.hash))
       : clearGuardPathCookie()
   ]);
 
   if (!needsReload) {
-    reloadAttempts.delete(details.tabId);
+    reloadAttempts.delete(tabId);
     return;
   }
-  if (shouldReloadTab(details.tabId, details.url)) {
-    await chrome.tabs.update(details.tabId, { url: url.href });
+  if (shouldReloadTab(tabId, requestedUrl)) {
+    await chrome.tabs.update(tabId, { url: url.href });
   } else {
-    await clearStorefrontState(details.tabId);
+    await clearStorefrontState(tabId);
   }
+}
+
+async function handleStorefrontNavigation(details) {
+  if (details.frameId !== 0) return;
+
+  const url = new URL(details.url);
+  if (url.origin !== APPLE_ORIGIN) return;
+
+  const country = storefrontOf(url);
+  if (!country) return handleCountrylessNavigation(details.tabId);
+
+  const wasPrepared = preparedCountryByTab.get(details.tabId) === country;
+  preparedCountryByTab.delete(details.tabId);
+
+  if (country === "cn") {
+    await Promise.allSettled([clearItspodCookie(), updateCountryRewriteRule(null, details.tabId)]);
+    return;
+  }
+
+  await syncStorefront(country, url, details.tabId, wasPrepared, details.url);
 }
 
 chrome.webNavigation.onBeforeNavigate.addListener(

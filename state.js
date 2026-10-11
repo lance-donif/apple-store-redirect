@@ -2,14 +2,15 @@ const SWITCH_CHANNEL = "appleStoreRedirectGuard";
 // Key names are the wire contract with forgetStorefront() in guard.js: content
 // scripts can't share constants, so rename both sides together.
 const STORE_PREFIX = "appleStoreRedirectGuard";
+const storeKey = (suffix) => `${STORE_PREFIX}.${suffix}`;
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== "clearCountryIntent") return;
 
   try {
-    sessionStorage.removeItem(`${STORE_PREFIX}.country`);
-    sessionStorage.removeItem(`${STORE_PREFIX}.appPath`);
-    sessionStorage.setItem(`${STORE_PREFIX}.switching`, "1");
+    sessionStorage.removeItem(storeKey("country"));
+    sessionStorage.removeItem(storeKey("appPath"));
+    sessionStorage.setItem(storeKey("switching"), "1");
   } catch {}
 });
 
