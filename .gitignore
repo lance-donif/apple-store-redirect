@@ -1,2 +1,11 @@
+# 依赖
 node_modules/
+
+# 临时目录
 .tmp-*
+
+# WorkBuddy 项目数据（会话记忆等本地数据，不属于源码）
+.workbuddy/
+
+# Chrome 加载未打包扩展时自动生成的 DNR 索引规则（运行时产物）
+_metadata/
