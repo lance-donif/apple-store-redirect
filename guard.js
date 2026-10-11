@@ -16,7 +16,8 @@
   const POD_COOKIE = "itspod";
   const GUARD_COUNTRY_COOKIE = "__asgc";
   const GUARD_PATH_COOKIE = "__asgp";
-  const SWITCH_CHANNEL = "appleStoreRedirectGuard";
+  const SWITCH_CHANNEL = STORE_PREFIX;
+  const SWITCHER_ID = "apple-store-country-switcher";
   const EPOCH = "Thu, 01 Jan 1970 00:00:00 GMT";
 
   const COUNTRIES = [
@@ -66,16 +67,13 @@
   };
   // Every write is same-site+secure on `path=/`, matching what Apple issues, and the
   // cookie setter is wrapped so a frozen or sandboxed document can't break the guard.
-  const writeCookie = (name, value, domain) => {
+  const setCookieRaw = (name, value, expires, domain) => {
     try {
-      document.cookie = `${name}=${value};${domain ? `domain=${domain};` : ""}path=/;expires=${oneYearOut()};secure;samesite=none`;
+      document.cookie = `${name}=${value};${domain ? `domain=${domain};` : ""}path=/;expires=${expires};secure;samesite=none`;
     } catch {}
   };
-  const eraseCookie = (name, domain) => {
-    try {
-      document.cookie = `${name}=;${domain ? `domain=${domain};` : ""}path=/;expires=${EPOCH};secure;samesite=none`;
-    } catch {}
-  };
+  const writeCookie = (name, value, domain) => setCookieRaw(name, value, oneYearOut(), domain);
+  const eraseCookie = (name, domain) => setCookieRaw(name, "", EPOCH, domain);
   const readCookie = (name) => {
     try {
       return document.cookie.match(`(?:^|;\\s*)${name}=([^;]+)`)?.[1] ?? null;
@@ -133,6 +131,11 @@
     removeStore(SWITCHING_KEY);
     writeCookie(GUARD_COUNTRY_COOKIE, country.toUpperCase(), APPLE_HOST);
   };
+  const clearStoredAppPath = () => {
+    pendingAppUrl = null;
+    removeStore(APP_PATH_STORAGE_KEY);
+    eraseCookie(GUARD_PATH_COOKIE, APPLE_HOST);
+  };
   const forgetStorefront = () => {
     targetCountry = null;
     removeStore(COUNTRY_STORAGE_KEY);
@@ -143,11 +146,6 @@
   const clearStorefrontIntent = () => {
     forgetStorefront();
     forgetGeoCookie();
-  };
-  const clearStoredAppPath = () => {
-    pendingAppUrl = null;
-    removeStore(APP_PATH_STORAGE_KEY);
-    eraseCookie(GUARD_PATH_COOKIE, APPLE_HOST);
   };
   const rememberAppPath = (url) => {
     pendingAppUrl = url.href;
@@ -209,10 +207,14 @@
   persistAppPath(startUrl);
   let restoringInitialPath = !targetableCountry && Boolean(targetCountry);
 
+  const setPageHidden = (hidden) => {
+    if (document.documentElement) document.documentElement.style.display = hidden ? "none" : "";
+  };
+
   // If we landed on /cn/ due to server redirect, restore the original path before Apple boots.
   if (restoringInitialPath) {
     removeStore(FORCE_REDIRECT_KEY);
-    if (document.documentElement) document.documentElement.style.display = "none";
+    setPageHidden(true);
 
     const restoreOriginalPath = (retries) => {
       const redirectUrl = storedAppUrl(targetCountry);
@@ -222,7 +224,7 @@
         announceStorefront(targetCountry);
         history.replaceState(history.state, "", redirectUrl);
         notifyRouteChangeSoon();
-        if (document.documentElement) document.documentElement.style.display = "";
+        setPageHidden(false);
         return;
       }
       if (retries < 10) {
@@ -234,7 +236,7 @@
       url.pathname = url.pathname.replace(CHINA_PATH, `/${targetCountry}`);
       history.replaceState(history.state, "", url.href);
       notifyRouteChangeSoon();
-      if (document.documentElement) document.documentElement.style.display = "";
+      setPageHidden(false);
     };
     restoreOriginalPath(0);
   }
@@ -306,15 +308,13 @@
 
     try {
       const url = new URL(String(rawUrl), location.href);
-      if (!isAppsUrl(url) || !CHINA_PATH.test(url.pathname)) {
-        guardLoopCount = 0;
-        return rawUrl;
-      }
-      if (restoringInitialPath || !targetCountry) {
-        guardLoopCount = 0;
-        return rawUrl;
-      }
-      if (readStore(SWITCHING_KEY)) {
+      const passThrough =
+        !isAppsUrl(url) ||
+        !CHINA_PATH.test(url.pathname) ||
+        restoringInitialPath ||
+        !targetCountry ||
+        Boolean(readStore(SWITCHING_KEY));
+      if (passThrough) {
         guardLoopCount = 0;
         return rawUrl;
       }
@@ -365,56 +365,49 @@
     if (repairedUrl !== location.href) history.replaceState(history.state, "", repairedUrl);
   };
 
-  for (const name of ["pushState", "replaceState"]) {
-    const original = history[name];
-    if (typeof original !== "function") continue;
+  // Shared interception for every patched navigation API: guard the URL, mirror the
+  // app-path intent, then hand off to the original.
+  const guardedWithIntent = (rawUrl) => {
+    const nextUrl = guarded(rawUrl);
+    try { persistAppPath(new URL(nextUrl, location.href)); } catch {}
+    return nextUrl;
+  };
 
-    Object.defineProperty(history, name, {
-      configurable: true,
-      writable: true,
-      value(...args) {
-        const hasUrl = args[2] != null;
-        if (hasUrl) {
-          args[2] = guarded(args[2]);
-          try { persistAppPath(new URL(args[2], location.href)); } catch {}
+  const patchMethod = (target, name, intercept) => {
+    const original = target[name];
+    if (typeof original !== "function") return;
+    try {
+      Object.defineProperty(target, name, {
+        configurable: true,
+        writable: true,
+        value(...args) {
+          return intercept(original, this, args);
         }
-        const result = original.apply(this, args);
-        repairCurrentUrl();
-        return result;
-      }
+      });
+    } catch {}
+  };
+
+  for (const name of ["pushState", "replaceState"]) {
+    patchMethod(history, name, (original, self, args) => {
+      if (args[2] != null) args[2] = guardedWithIntent(args[2]);
+      const result = original.apply(self, args);
+      repairCurrentUrl();
+      return result;
     });
   }
 
   if (globalThis.navigation?.navigate) {
-    const original = globalThis.navigation.navigate;
-    Object.defineProperty(globalThis.navigation, "navigate", {
-      configurable: true,
-      writable: true,
-      value(url, options) {
-        const nextUrl = guarded(url);
-        try { persistAppPath(new URL(nextUrl, location.href)); } catch {}
-        const result = original.call(this, nextUrl, options);
-        queueMicrotask(repairCurrentUrl);
-        return result;
-      }
+    patchMethod(globalThis.navigation, "navigate", (original, self, [url, options]) => {
+      const result = original.call(self, guardedWithIntent(url), options);
+      queueMicrotask(repairCurrentUrl);
+      return result;
     });
   }
 
   for (const name of ["assign", "replace"]) {
-    const original = Location.prototype[name];
-    if (typeof original !== "function") continue;
-
-    try {
-      Object.defineProperty(Location.prototype, name, {
-        configurable: true,
-        writable: true,
-        value(url) {
-          const nextUrl = guarded(url);
-          try { persistAppPath(new URL(nextUrl, location.href)); } catch {}
-          return original.call(this, nextUrl);
-        }
-      });
-    } catch {}
+    patchMethod(Location.prototype, name, (original, self, [url]) =>
+      original.call(self, guardedWithIntent(url))
+    );
   }
 
   const handleRouteChange = () => {
@@ -483,12 +476,13 @@
 
   const createCountrySwitcher = (activeCountry) => {
     const wrapper = document.createElement("div");
-    wrapper.id = "apple-store-country-switcher";
+    wrapper.id = SWITCHER_ID;
     wrapper.style.cssText = "position:relative;display:inline-flex;align-items:center;height:44px;margin-left:12px;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif;";
 
     const button = document.createElement("button");
     const current = COUNTRIES.find((c) => c.code.toLowerCase() === activeCountry) || COUNTRIES[0];
-    button.textContent = `${current.name} (${current.code})`;
+    const buttonLabel = (country) => `${country.name} (${country.code})`;
+    button.textContent = buttonLabel(current);
     button.style.cssText = `
       display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;
       border:0;border-radius:6px;background:transparent;color:#1d1d1f;font-size:12px;
@@ -516,7 +510,7 @@
       item.onmouseleave = () => (item.style.background = "transparent");
       item.onclick = () => {
         selectCountry(country);
-        button.textContent = `${country.name} (${country.code})`;
+        button.textContent = buttonLabel(country);
         menu.style.display = "none";
 
         const url = new URL(location.href);
@@ -547,7 +541,7 @@
     // Show the user's intended country, not the URL's country.
     // After Apple redirects to /cn/, the URL says CN but the user selected something else.
     const activeCountry = targetCountry || storedCountry || urlCountry || "us";
-    const existing = document.getElementById("apple-store-country-switcher");
+    const existing = document.getElementById(SWITCHER_ID);
     if (existing) {
       if (existing.dataset?.country === activeCountry && document.contains(existing)) return;
       existing.remove();
@@ -564,7 +558,7 @@
   injectCountrySwitcher();
 
   const observer = new MutationObserver(() => {
-    if (document.getElementById("apple-store-country-switcher")) return;
+    if (document.getElementById(SWITCHER_ID)) return;
     injectCountrySwitcher();
   });
   observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
