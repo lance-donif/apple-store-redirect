@@ -100,6 +100,15 @@ const buildCountryRewriteRule = (id, code, tabId) => ({
   }
 });
 
+// DNR may return object keys or resource types in a different order.
+const countryRuleSignature = (rule) => JSON.stringify(rule, (key, value) => {
+  if (key === "resourceTypes" && Array.isArray(value)) return [...value].sort();
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.fromEntries(Object.keys(value).sort().map((name) => [name, value[name]]));
+  }
+  return value;
+});
+
 const freeRuleId = (usedRuleIds) => {
   for (let candidate = COUNTRY_REWRITE_RULE_ID_MIN; candidate <= COUNTRY_REWRITE_RULE_ID_MAX; candidate++) {
     if (!usedRuleIds.has(candidate)) return candidate;
@@ -122,9 +131,12 @@ async function applyCountryRewriteRule(country, tabId) {
   }
 
   const ruleId = existing?.id ?? freeRuleId(new Set(rewriteRules.map((rule) => rule.id)));
+  const nextRule = buildCountryRewriteRule(ruleId, code, tabId);
+  if (existing && countryRuleSignature(existing) === countryRuleSignature(nextRule)) return;
+
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds,
-    addRules: [buildCountryRewriteRule(ruleId, code, tabId)]
+    addRules: [nextRule]
   });
 }
 
@@ -212,7 +224,7 @@ function shouldReloadTab(tabId, requestedUrl) {
 
   if (count <= MAX_RELOADS_PER_URL) return true;
 
-  console.warn(`[Redirect Guard] Prevented reload loop on tab ${tabId} for URL ${requestedUrl}`);
+  console.warn(`[Redirect Guard] Prevented reload loop on tab ${tabId}`);
   reloadAttempts.delete(tabId);
   return false;
 }
@@ -246,7 +258,7 @@ async function syncStorefront(country, url, tabId, wasPrepared, requestedUrl) {
     clearItspodCookie(),
     updateCountryRewriteRule(country, tabId),
     APP_PATH.test(url.pathname)
-      ? setGuardPathCookie(encodeURIComponent(url.pathname + url.search + url.hash))
+      ? setGuardPathCookie(encodeURIComponent(url.pathname))
       : clearGuardPathCookie()
   ]);
 

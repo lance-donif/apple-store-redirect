@@ -151,7 +151,7 @@
     pendingAppUrl = url.href;
     const encodedPath = encodeURIComponent(url.pathname + url.search + url.hash);
     writeStore(APP_PATH_STORAGE_KEY, encodedPath);
-    writeCookie(GUARD_PATH_COOKIE, encodedPath, APPLE_HOST);
+    writeCookie(GUARD_PATH_COOKIE, encodeURIComponent(url.pathname), APPLE_HOST);
   };
   const persistAppPath = (url) => {
     if (!isAppsUrl(url)) return;
@@ -176,9 +176,27 @@
       return null;
     }
   };
+  // Cookies travel with requests; parameters and fragments stay in tab storage.
+  const sanitizeAppPathCookie = () => {
+    const value = readCookie(GUARD_PATH_COOKIE);
+    if (!value) return null;
+    try {
+      const url = new URL(decodeURIComponent(value), APPLE_ORIGIN);
+      if (!isAppsUrl(url) || url.username || url.password ||
+          !asCountry(countryOf(url)) || !APP_PATH.test(url.pathname)) {
+        throw new Error("Invalid stored App path");
+      }
+      const path = encodeURIComponent(url.pathname);
+      if (value !== path) writeCookie(GUARD_PATH_COOKIE, path, APPLE_HOST);
+      return path;
+    } catch {
+      eraseCookie(GUARD_PATH_COOKIE, APPLE_HOST);
+      return null;
+    }
+  };
   const storedAppUrl = (country) =>
     savedAppUrl(readStore(APP_PATH_STORAGE_KEY), country) ??
-    savedAppUrl(readCookie(GUARD_PATH_COOKIE), country);
+    savedAppUrl(sanitizeAppPathCookie(), country);
 
   const notifyRouteChange = () => {
     try {
@@ -196,6 +214,7 @@
 
   const startUrl = new URL(location.href);
   if (!isAppsUrl(startUrl)) return;
+  sanitizeAppPathCookie();
   const storedCountry = asCountry(readStore(COUNTRY_STORAGE_KEY)) ??
     asCountry(readCookie(GUARD_COUNTRY_COOKIE));
   const isSwitching = Boolean(readStore(SWITCHING_KEY));
@@ -528,13 +547,16 @@
       menu.style.display = menu.style.display === "block" ? "none" : "block";
     };
 
-    document.addEventListener("click", (event) => {
-      if (!wrapper.contains(event.target)) menu.style.display = "none";
-    });
-
     wrapper.append(button, menu);
     return wrapper;
   };
+
+  // Resolve the current nodes at click time so remounts do not retain old menus.
+  document.addEventListener("click", (event) => {
+    const switcher = document.getElementById(SWITCHER_ID);
+    const menu = switcher?.lastElementChild;
+    if (menu && !switcher.contains(event.target)) menu.style.display = "none";
+  });
 
   const injectCountrySwitcher = () => {
     const urlCountry = countryOf(new URL(location.href));

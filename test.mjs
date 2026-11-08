@@ -88,7 +88,9 @@ assert.ok(rules[0].condition.resourceTypes.includes("xmlhttprequest"));
 assert.ok(!rules[0].action.requestHeaders.some((h) => h.header === "cookie"));
 assert.deepEqual(rules[1].condition.requestDomains, ["apps.apple.com"]);
 
-async function runBackgroundNavigations(urls, cookies = {}) {
+async function runBackgroundNavigations(urls, cookies = {}, initialRules = []) {
+  const ruleUpdates = [];
+  const sessionRuleMap = new Map(initialRules.map((rule) => [rule.id, structuredClone(rule)]));
   const cookieSets = [];
   const cookieRemovals = [];
   const tabUpdates = [];
@@ -125,7 +127,13 @@ async function runBackgroundNavigations(urls, cookies = {}) {
         }
       },
       declarativeNetRequest: {
-        updateSessionRules() {
+        getSessionRules() {
+          return Promise.resolve([...sessionRuleMap.values()].map((rule) => structuredClone(rule)));
+        },
+        updateSessionRules(details) {
+          ruleUpdates.push(structuredClone(details));
+          for (const id of details.removeRuleIds || []) sessionRuleMap.delete(id);
+          for (const rule of details.addRules || []) sessionRuleMap.set(rule.id, structuredClone(rule));
           return Promise.resolve();
         }
       },
@@ -156,7 +164,58 @@ async function runBackgroundNavigations(urls, cookies = {}) {
       : { frameId: 0, ...navigation };
     await listener(details);
   }
-  return { cookieSets, cookieRemovals, tabUpdates, tabMessages };
+  return { cookieSets, cookieRemovals, tabUpdates, tabMessages, ruleUpdates, sessionRules: [...sessionRuleMap.values()] };
+}
+
+// Unchanged rules are reused, including rules returned with a different key/type order.
+{
+  const storedRule = {
+    condition: {
+      tabIds: [1],
+      resourceTypes: ["sub_frame", "xmlhttprequest"],
+      regexFilter: "^https://apps\\.apple\\.com/cn(/.*)$"
+    },
+    action: { redirect: { regexSubstitution: "https://apps.apple.com/gb\\1" }, type: "redirect" },
+    priority: 200,
+    id: 10005
+  };
+  const { ruleUpdates, sessionRules } = await runBackgroundNavigations([
+    "https://apps.apple.com/gb/iphone/today",
+    "https://apps.apple.com/gb/iphone/apps"
+  ], {}, [storedRule]);
+  assert.equal(ruleUpdates.filter((update) => update.addRules?.length).length, 0);
+  assert.deepEqual(sessionRules, [storedRule]);
+
+  // Matching only the country would incorrectly retain these changed rules.
+  for (const alter of [
+    (rule) => { rule.priority = 1; },
+    (rule) => { rule.condition.resourceTypes.push("main_frame"); },
+    (rule) => { rule.condition.excludedRequestDomains = ["example.com"]; }
+  ]) {
+    const staleRule = structuredClone(storedRule);
+    alter(staleRule);
+    const repaired = await runBackgroundNavigations(["https://apps.apple.com/gb/iphone/today"], {}, [staleRule]);
+    assert.equal(repaired.ruleUpdates.filter((update) => update.addRules?.length).length, 1);
+    assert.equal(repaired.sessionRules[0].id, storedRule.id);
+    assert.equal(repaired.sessionRules[0].priority, 200);
+    assert.deepEqual(repaired.sessionRules[0].condition.resourceTypes.sort(), ["sub_frame", "xmlhttprequest"]);
+    assert.equal("excludedRequestDomains" in repaired.sessionRules[0].condition, false);
+  }
+}
+
+// Repeated same-country visits avoid writes; changing/clearing one tab keeps the other.
+{
+  const { ruleUpdates, sessionRules } = await runBackgroundNavigations([
+    { tabId: 1, url: "https://apps.apple.com/gb/iphone/today" },
+    { tabId: 1, url: "https://apps.apple.com/gb/iphone/apps" },
+    { tabId: 2, url: "https://apps.apple.com/gb/iphone/today" },
+    { tabId: 1, url: "https://apps.apple.com/jp/iphone/today" },
+    { tabId: 1, url: "https://apps.apple.com/cn/iphone/today" }
+  ]);
+  assert.equal(ruleUpdates.filter((update) => update.addRules?.length).length, 3);
+  assert.equal(sessionRules.length, 1);
+  assert.deepEqual(sessionRules[0].condition.tabIds, [2]);
+  assert.equal(sessionRules[0].action.redirect.regexSubstitution, "https://apps.apple.com/gb\\1");
 }
 
 async function runBackgroundInstall(reason) {
@@ -379,6 +438,9 @@ async function runBackgroundInstall(reason) {
 function runAt(href, storage = {}, cookie = "", deferTimeouts = false, injectNavigation = false) {
   const calls = [];
   const listeners = {};
+  const documentListeners = {};
+  const observers = [];
+  const cookieWrites = [];
   const timers = [];
   const styles = [];
   const navChildren = [];
@@ -437,7 +499,7 @@ function runAt(href, storage = {}, cookie = "", deferTimeouts = false, injectNav
     document: {
       readyState: "complete",
       getElementById(id) {
-        return styles.find((style) => style.id === id) ?? null;
+        return styles.find((style) => !style.removed && style.id === id) ?? null;
       },
       createElement(tagName) {
         const element = {
@@ -447,21 +509,26 @@ function runAt(href, storage = {}, cookie = "", deferTimeouts = false, injectNav
           style: {},
           dataset: {},
           children: [],
+          get lastElementChild() { return this.children.at(-1) ?? null; },
           append(...nodes) { this.children.push(...nodes); },
-          contains() { return false; },
-          remove() {}
+          contains(node) { return this === node || this.children.some((child) => child.contains(node)); },
+          remove() { this.removed = true; }
         };
         styles.push(element);
         return element;
       },
-      addEventListener() {},
-      contains() {
-        return true;
+      addEventListener(eventName, callback) {
+        documentListeners[eventName] ??= [];
+        documentListeners[eventName].push(callback);
+      },
+      contains(element) {
+        return Boolean(element && !element.removed);
       },
       get cookie() {
         return cookieJar;
       },
       set cookie(value) {
+        cookieWrites.push(String(value));
         cookieJar = cookieJar ? `${cookieJar}; ${value}` : String(value);
       },
       documentElement: {
@@ -481,6 +548,7 @@ function runAt(href, storage = {}, cookie = "", deferTimeouts = false, injectNav
     },
     XPathResult: { FIRST_ORDERED_NODE_TYPE: 9 },
     MutationObserver: class {
+      constructor(callback) { observers.push(callback); }
       observe() {}
       disconnect() {}
     },
@@ -543,7 +611,59 @@ function runAt(href, storage = {}, cookie = "", deferTimeouts = false, injectNav
   context.window = context;
 
   vm.runInNewContext(guard, context);
-  return { calls, context, listeners, local, navChildren, session, styles, timers, get cookie() { return cookieJar; } };
+  return { calls, context, listeners, documentListeners, observers, cookieWrites, local, navChildren, session, styles, timers, get cookie() { return cookieJar; } };
+}
+
+// A remounted menu uses the same document listener without touching detached menus.
+{
+  const page = runAt("https://apps.apple.com/gb/iphone/today", {}, "", false, true);
+  for (let index = 0; index < 5; index++) {
+    const wrapper = page.navChildren.at(-1);
+    const [button, menu] = wrapper.children;
+    button.onclick();
+    assert.equal(menu.style.display, "block");
+    for (const click of page.documentListeners.click) click({ target: menu.children[0] });
+    assert.equal(menu.style.display, "block", "inside clicks must not close the current menu");
+    for (const click of page.documentListeners.click) click({ target: {} });
+    assert.equal(menu.style.display, "none", "outside clicks close the current menu");
+
+    button.onclick();
+    wrapper.remove();
+    for (const changed of page.observers) changed();
+    assert.notEqual(page.navChildren.at(-1), wrapper);
+    assert.equal(page.documentListeners.click.length, 1, "remounts must not accumulate document listeners");
+    for (const click of page.documentListeners.click) click({ target: {} });
+    assert.equal(menu.style.display, "block", "the document handler must not retain a detached menu");
+  }
+}
+
+// Only the tab session retains URL parameters; cookies and cookie fallback are path-only.
+{
+  const appPath = "/us/app/example/id1";
+  const fullPath = appPath + "?campaign=private-query#private-fragment";
+  const page = runAt("https://apps.apple.com" + fullPath);
+  assert.equal(page.session.get("appleStoreRedirectGuard.appPath"), encodeURIComponent(fullPath));
+  const pathWrites = page.cookieWrites.filter((value) => value.startsWith("__asgp="));
+  assert.ok(pathWrites.length > 0);
+  assert.ok(pathWrites.every((value) => value.split(";")[0] === "__asgp=" + encodeURIComponent(appPath)));
+  const worker = await runBackgroundNavigations(["https://apps.apple.com" + fullPath]);
+  assert.deepEqual(worker.cookieSets.filter((item) => item.name === "__asgp").map((item) => item.value), [encodeURIComponent(appPath)]);
+
+  const legacyCookie = "__asgc=US; __asgp=" + encodeURIComponent(fullPath);
+  const restored = runAt("https://apps.apple.com/cn/iphone/today", {}, legacyCookie);
+  assert.equal(restored.context.location.href, "https://apps.apple.com" + appPath);
+  assert.ok(restored.cookieWrites.some((value) => value.split(";")[0] === "__asgp=" + encodeURIComponent(appPath)));
+  assert.ok(restored.cookieWrites.every((value) => !/private-query|private-fragment/.test(value)));
+
+  const sessionRestore = runAt("https://apps.apple.com/cn/iphone/today", {
+    "appleStoreRedirectGuard.country": "us",
+    "appleStoreRedirectGuard.appPath": encodeURIComponent(fullPath)
+  }, legacyCookie);
+  assert.equal(sessionRestore.context.location.href, "https://apps.apple.com" + fullPath);
+  assert.ok(sessionRestore.cookieWrites.every((value) => !/private-query|private-fragment/.test(value)));
+
+  const invalidCookie = runAt("https://apps.apple.com/cn/iphone/today", {}, "__asgp=" + encodeURIComponent("https://example.com/us/app/example/id1?private-query"));
+  assert.ok(invalidCookie.cookieWrites.some((value) => value.startsWith("__asgp=;")));
 }
 
 const us = runAt("https://apps.apple.com/us/app/12-twelves/id6447656121");
@@ -994,6 +1114,7 @@ assert.equal(cn.calls.length, 8);
 
 // Test background reload loop protection
 {
+  const warnings = [];
   // We simulate 4 consecutive navigations to the same JP URL on tab 1.
   // We mock chrome.cookies.get to always return a geo value of 'cn',
   // which forces needsReload to be true every time.
@@ -1036,10 +1157,11 @@ assert.equal(cn.calls.length, 8);
       webNavigation: { onBeforeNavigate: { addListener(cb) { listener = cb; } } }
     }
   };
+  context.console = { warn: (...args) => warnings.push(args.join(" ")) };
   vm.runInNewContext(background, context);
 
   // Trigger 4 navigations to the same US URL
-  const nav = { frameId: 0, tabId: 1, url: "https://apps.apple.com/us/app/12-twelves/id6447656121" };
+  const nav = { frameId: 0, tabId: 1, url: "https://apps.apple.com/us/app/12-twelves/id6447656121?campaign=private-query#private-fragment" };
   await listener(nav);
   await listener(nav);
   await listener(nav);
@@ -1049,6 +1171,8 @@ assert.equal(cn.calls.length, 8);
   // The 4th navigation triggers the safeguard, clearing cookies and NOT updating the tab again
   await listener(nav);
   assert.equal(tabUpdates.length, 3); // Still 3, no 4th update
+  assert.equal(warnings.length, 1);
+  assert.doesNotMatch(warnings[0], /https:|private-query|private-fragment|id6447656121/);
 
   // Verify that the safeguard removed the guard/intent cookies
   const removedNames = cookieRemovals.map(d => d.name);
